@@ -1,0 +1,16 @@
+# Production compose for the NAS — pulls the prebuilt multi-arch image from
+# GHCR instead of building from source (see scripts/publish.sh).
+#
+#   PS_IMAGE=ghcr.io/<your-gh-user>/poopsmoothie:latest \
+#     docker compose -f docker-compose.prod.yml up -d
+#
+# (or edit the default below and just `docker compose -f docker-compose.prod.yml up -d`)
+services:
+  poopsmoothie:
+    image: ${PS_IMAGE:-ghcr.io/david-chau/poopsmoothie:latest}
+    container_name: poopsmoothie
+    ports:
+      - "4321:4321"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

@@ -108,15 +108,42 @@ npm run bots -- ABCD 2   # add 2 bots to room ABCD
 
 ## Deploy (NAS / Docker)
 
+Serves on `:4321` (single container — Express + socket.io serve the built
+React app and the WebSocket API from the same origin, no separate frontend
+container). Maps `4321:4321` and mounts `./data:/data` for room persistence.
+
+### Option A — build on the host
+
 ```sh
 docker compose up -d --build   # game night
 docker compose down            # after
 ```
 
-Serves on `:4321` (single container — Express + socket.io serve the built
-React app and the WebSocket API from the same origin, no separate frontend
-container). `docker-compose.yml` maps `4321:4321` and mounts `./data:/data`
-for room persistence.
+Needs the source on the box and ~1GB RAM for the client build. Fine on a
+dev machine or a beefier NAS.
+
+### Option B — pull a prebuilt image (recommended for the NAS)
+
+Build multi-arch (amd64 + arm64) on your dev machine and push to GHCR, so the
+NAS just pulls — no source, no build RAM needed there:
+
+```sh
+# once: auth (classic token with write:packages)
+echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-gh-user> --password-stdin
+# publish (builds both arches, pushes :latest + a timestamp tag)
+GHCR_USER=<your-gh-user> ./scripts/publish.sh
+```
+
+Then on the NAS (`docker-compose.prod.yml` uses `image:` instead of `build:`):
+
+```sh
+PS_IMAGE=ghcr.io/<your-gh-user>/poopsmoothie:latest \
+  docker compose -f docker-compose.prod.yml up -d
+```
+
+To pull without logging in on the NAS, make the GHCR package **public**
+(GitHub → your profile → Packages → poopsmoothie → Package settings →
+change visibility). Otherwise `docker login ghcr.io` on the NAS first.
 
 Room state persists to `./data/rooms/*.json` on the host — survives a
 container restart mid-game; players just reload and rejoin, drawer taps
