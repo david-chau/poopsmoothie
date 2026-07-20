@@ -1,0 +1,9 @@
+services:
+  poopsmoothie:
+    build: .
+    container_name: poopsmoothie
+    ports:
+      - "4321:4321"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped

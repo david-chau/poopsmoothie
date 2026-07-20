@@ -1,0 +1,868 @@
+:root {
+  --bg: #faf9fb;
+  --text: #1a1a2e;
+  --text-dim: #6b6375;
+  --card-bg: #ffffff;
+  --border: #e5e4e7;
+  --accent: #7c3aed;
+  --accent-text: #ffffff;
+  --team-a: #2563eb;
+  --team-b: #dc2626;
+  --danger: #dc2626;
+  --success: #16a34a;
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171d;
+    --text: #f3f4f6;
+    --text-dim: #9ca3af;
+    --card-bg: #1f2028;
+    --border: #2e303a;
+    --accent: #a78bfa;
+    --accent-text: #16171d;
+    --team-a: #60a5fa;
+    --team-b: #f87171;
+  }
+}
+
+:root[data-theme='dark'] {
+  --bg: #16171d;
+  --text: #f3f4f6;
+  --text-dim: #9ca3af;
+  --card-bg: #1f2028;
+  --border: #2e303a;
+  --accent: #a78bfa;
+  --accent-text: #16171d;
+  --team-a: #60a5fa;
+  --team-b: #f87171;
+}
+
+:root[data-theme='light'] {
+  --bg: #faf9fb;
+  --text: #1a1a2e;
+  --text-dim: #6b6375;
+  --card-bg: #ffffff;
+  --border: #e5e4e7;
+  --accent: #7c3aed;
+  --accent-text: #ffffff;
+  --team-a: #2563eb;
+  --team-b: #dc2626;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.45 system-ui, 'Segoe UI', Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  /* svh (small viewport height), not dvh: dvh recalculates every time iOS's
+     address bar shows/hides during scroll, which reflows anything pinned via
+     margin-top:auto inside this container (e.g. .btn-bottom) mid-scroll —
+     svh is fixed to the toolbar-collapsed size and never triggers that. */
+  min-height: 100svh;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0 0 0.5rem;
+  font-weight: 700;
+}
+
+p {
+  margin: 0 0 0.5rem;
+  color: var(--text-dim);
+}
+
+/* mobile-first app shell: fills the phone, centers with room on desktop */
+.app-shell {
+  max-width: 640px;
+  margin: 0 auto;
+  /* svh (small viewport height), not dvh: dvh recalculates every time iOS's
+     address bar shows/hides during scroll, which reflows anything pinned via
+     margin-top:auto inside this container (e.g. .btn-bottom) mid-scroll —
+     svh is fixed to the toolbar-collapsed size and never triggers that. */
+  min-height: 100svh;
+  padding: max(1rem, env(safe-area-inset-top)) max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom)) max(1rem, env(safe-area-inset-left));
+  display: flex;
+  flex-direction: column;
+}
+
+.screen {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.screen-center {
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  flex: 1;
+}
+
+.title {
+  font-size: clamp(1.5rem, 5vw, 2.25rem);
+}
+
+.subtitle {
+  color: var(--text-dim);
+}
+
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+}
+
+.banner {
+  text-align: center;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+  text-align: left;
+}
+
+.field span {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+input,
+.word-input {
+  font-size: 1rem;
+  padding: 0.75rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  width: 100%;
+}
+
+.word-input {
+  margin-bottom: 0.5rem;
+}
+
+.room-code-input {
+  text-align: center;
+  font-size: 1.5rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+}
+
+/* buttons: full-width, thumb-height, safe-area aware when pinned to the bottom */
+.btn {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--card-bg);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 0.9rem 1.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.btn-bottom {
+  margin-top: auto;
+  padding-bottom: max(0.9rem, env(safe-area-inset-bottom));
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 0;
+  margin-left: 0.5rem;
+}
+
+.host-escape-hatches {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  margin-top: 0.5rem;
+}
+
+.skip-link {
+  align-self: center;
+  margin-top: 0;
+}
+
+.leave-link {
+  align-self: flex-start;
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+}
+
+.lobby-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.lobby-topbar .leave-link,
+.lobby-topbar .link-btn {
+  margin: 0;
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* always side-by-side, even on narrow phones — matches the Scores summary's
+   left/right pattern instead of stacking up/down */
+.teams-grid {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.team-column {
+  flex: 1;
+  min-width: 0;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 12px;
+  padding: 0.75rem;
+}
+
+.team-column.team-blue {
+  border-left-color: var(--team-a);
+}
+
+.team-column.team-red {
+  border-left-color: var(--team-b);
+}
+
+/* text color utilities — used wherever "Team Blue"/"Team Red" or a score
+   number needs to read as that team's color, not just plain text.
+   --score-team-color lets .score-flash animate back to the RIGHT team color
+   instead of a generic `inherit`. */
+.team-blue {
+  color: var(--team-a);
+  --score-team-color: var(--team-a);
+}
+
+.team-red {
+  color: var(--team-b);
+  --score-team-color: var(--team-b);
+}
+
+.player-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.player-list li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.player-list li > span:not(.dot) {
+  overflow-wrap: anywhere;
+}
+
+.player-list li.disconnected {
+  opacity: 0.5;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  flex-shrink: 0;
+}
+
+.disconnected .dot {
+  background: var(--text-dim);
+}
+
+.badge {
+  font-size: 0.7rem;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+}
+
+.room-code-block {
+  text-align: center;
+}
+
+.room-code-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.room-code {
+  font-size: clamp(2.5rem, 12vw, 4rem);
+  letter-spacing: 0.15em;
+  text-align: center;
+  margin-bottom: 0;
+}
+
+.copy-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 1.5rem;
+  line-height: 1;
+  padding: 0.25rem;
+}
+
+/* turn screen */
+.turn-header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.25rem 0.75rem;
+  font-weight: 600;
+}
+
+.round-label {
+  font-size: 1.1rem;
+}
+
+.score-line {
+  font-size: clamp(0.8rem, 3.5vw, 1rem);
+  white-space: nowrap;
+}
+
+/* CSS-driven, not React-state-driven: a fresh mount (via key) reliably plays
+   this to completion regardless of how React batches surrounding updates. */
+@keyframes scorePulse {
+  0% {
+    color: var(--success);
+  }
+  100% {
+    color: var(--score-team-color, inherit);
+  }
+}
+
+.score-flash {
+  animation: scorePulse 0.6s ease-out forwards;
+}
+
+.timer {
+  font-size: clamp(2.5rem, 15vw, 4rem);
+  font-weight: 800;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.paper-slip-stage {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30vh;
+  perspective: 800px;
+}
+
+/* folded paper: .paper-wrap sizes the box (padding + text), .paper-paper is an
+   absolutely-positioned layer underneath that does the scaleX unfold so the
+   text itself never gets stretched by the transform. */
+.paper-slip-wrap {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  min-height: clamp(140px, 30vw, 220px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: clamp(1.5rem, 6vw, 3rem);
+}
+
+.paper-slip-paper {
+  position: absolute;
+  inset: 0;
+  /* fixed parchment tone, deliberately NOT var(--card-bg) — real paper
+     doesn't turn navy blue just because the app is in dark mode */
+  background-color: #ece2c8;
+  /* baked bump-lit crumple texture (feTurbulence -> feDiffuseLighting, the
+     standard SVG technique for an embossed/wrinkled look) used as a plain
+     background-image. An SVG referenced this way is rasterized once at
+     decode time — the browser just scales that bitmap every frame like any
+     other image layer, unlike a live `filter:` on the element itself, which
+     must recompute every frame and is what janked mobile GPUs before. This
+     is why it can now stay visible through the entire fold, not just at rest. */
+  background-image:
+    radial-gradient(ellipse at 18% 12%, rgba(110, 85, 40, 0.18), transparent 50%),
+    radial-gradient(ellipse at 88% 85%, rgba(110, 85, 40, 0.16), transparent 50%),
+    radial-gradient(ellipse at 68% 22%, rgba(110, 85, 40, 0.12), transparent 42%),
+    radial-gradient(ellipse at 12% 78%, rgba(110, 85, 40, 0.12), transparent 42%),
+    repeating-linear-gradient(112deg, rgba(80, 60, 25, 0.12) 0px, transparent 1.5px, transparent 22px),
+    repeating-linear-gradient(-16deg, rgba(80, 60, 25, 0.1) 0px, transparent 1.5px, transparent 28px),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='b' x='0' y='0' width='100%25' height='100%25'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.025 0.035' numOctaves='4' seed='7' result='noise'/%3E%3CfeDiffuseLighting in='noise' surfaceScale='6' diffuseConstant='1.3' lighting-color='%23fffaf0' result='light'%3E%3CfeDistantLight azimuth='235' elevation='38'/%3E%3C/feDiffuseLighting%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23b)'/%3E%3C/svg%3E"),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    160px 160px;
+  background-blend-mode: multiply, multiply, multiply, multiply, multiply, multiply, overlay, multiply;
+  transform-origin: center;
+  /* torn-paper silhouette. This has to be clip-path, not border-radius+border:
+     background-image layers only paint inside the existing box shape, they
+     can't reshape it — and border/box-shadow both follow the original
+     rectangular box, ignoring clip-path, so a jagged edge needs both the clip
+     AND a shadow that's computed from the clipped alpha shape (drop-shadow,
+     not box-shadow). Pure geometry + a cheap filter primitive, not per-frame
+     noise/displacement, so this stays smooth on mobile through the fold too. */
+  clip-path: polygon(
+    1% 2%,
+    12% 0%,
+    24% 3%,
+    37% 0%,
+    50% 2%,
+    63% 0%,
+    76% 3%,
+    88% 0%,
+    99% 2%,
+    100% 14%,
+    97% 27%,
+    100% 40%,
+    98% 53%,
+    100% 66%,
+    97% 79%,
+    100% 92%,
+    99% 99%,
+    87% 100%,
+    74% 97%,
+    62% 100%,
+    49% 98%,
+    37% 100%,
+    24% 97%,
+    12% 100%,
+    1% 98%,
+    0% 85%,
+    3% 72%,
+    0% 59%,
+    2% 46%,
+    0% 33%,
+    3% 20%,
+    0% 8%
+  );
+  filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.35));
+}
+
+.paper-slip-crease {
+  position: absolute;
+  top: 6%;
+  bottom: 6%;
+  left: 50%;
+  width: 4px;
+  transform: translateX(-50%);
+  background: rgba(70, 50, 20, 0.4);
+  box-shadow:
+    -2px 0 4px rgba(70, 50, 20, 0.25),
+    2px 0 4px rgba(255, 255, 255, 0.15);
+}
+
+/* CSS-driven, not React-state-driven — see .score-flash above for why: a
+   fresh mount (via key) reliably plays this regardless of React's batching. */
+@keyframes wordFlashCorrect {
+  0% {
+    color: var(--success);
+  }
+  100% {
+    color: #2c2213;
+  }
+}
+
+@keyframes wordFlashPass {
+  0% {
+    color: var(--danger);
+  }
+  100% {
+    color: #2c2213;
+  }
+}
+
+.paper-word-flash-correct {
+  animation: wordFlashCorrect 0.6s ease-out forwards;
+}
+
+.paper-word-flash-pass {
+  animation: wordFlashPass 0.6s ease-out forwards;
+}
+
+.paper-slip-text {
+  position: relative;
+  z-index: 1;
+  color: #2c2213; /* fixed dark ink — stays legible on the fixed light paper in any app theme */
+  font-size: clamp(1.75rem, 8vw, 3rem);
+  font-weight: 700;
+  text-align: center;
+}
+
+.turn-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.turn-actions .btn {
+  min-height: 64px;
+  font-size: 1.15rem;
+}
+
+.btn-pass {
+  background: var(--bg);
+}
+
+.btn-correct {
+  background: var(--success);
+  color: white;
+  border-color: var(--success);
+}
+
+.drawer-status {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* scores */
+/* always side-by-side, even on narrow phones — a head-to-head pair of
+   numbers reads more naturally left/right than stacked up/down */
+.score-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.score-summary-side {
+  flex: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.trophy {
+  margin-left: 0.35rem;
+  font-size: 0.85em;
+}
+
+.mvp-line {
+  font-size: 0.8rem;
+  margin: 0.15rem 0 0;
+}
+
+.score-summary-divider {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+
+.big-score {
+  font-size: clamp(2.25rem, 10vw, 3rem);
+  font-weight: 800;
+  /* no color here — the team-blue/team-red utility class alongside it wins */
+}
+
+.team-blue-bg {
+  background: var(--team-a);
+}
+
+.team-red-bg {
+  background: var(--team-b);
+}
+
+.round-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.round-chart-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.round-chart-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  text-align: center;
+}
+
+/* diverging (tug-of-war) layout: Blue grows left from center, Red grows
+   right — reads as a head-to-head comparison instead of two stacked bars */
+.round-chart-vs {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.round-chart-track-row {
+  position: relative;
+  flex: 1;
+  display: flex;
+  align-items: stretch;
+  height: 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.round-chart-track-row::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  transform: translateX(-50%);
+}
+
+.round-chart-half {
+  flex: 1;
+  display: flex;
+  height: 100%;
+}
+
+.round-chart-half-left {
+  justify-content: flex-end;
+}
+
+.round-chart-half-right {
+  justify-content: flex-start;
+}
+
+.round-chart-bar {
+  height: 100%;
+  transition: width 0.5s ease-out;
+}
+
+.round-chart-value {
+  min-width: 1.75rem;
+  font-variant-numeric: tabular-nums;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.round-chart-value-left {
+  text-align: right;
+}
+
+.round-chart-value-right {
+  text-align: left;
+}
+
+.confetti-stage {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+  z-index: 50;
+}
+
+.confetti-piece {
+  position: absolute;
+  top: -20px;
+  opacity: 0.95;
+  border-radius: 2px;
+  animation-name: confettiFall;
+  animation-timing-function: ease-in;
+  animation-fill-mode: forwards;
+}
+
+@keyframes confettiFall {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--drift), 105vh) rotate(var(--rotate));
+    opacity: 0.3;
+  }
+}
+
+.pool-table-scroll {
+  overflow-x: auto;
+}
+
+.pool-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.pool-table th {
+  text-align: left;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  font-weight: 600;
+  padding: 0.4rem 0.5rem;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.pool-table td {
+  padding: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+  vertical-align: middle;
+}
+
+.pool-table-word {
+  font-weight: 700;
+  max-width: 40vw;
+}
+
+.scored-by-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+
+.scored-by-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+}
+
+.scored-by-round {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.scored-by-empty {
+  color: var(--text-dim);
+}
+
+/* rules dialog */
+.rules-dialog {
+  /* explicit left-align: without it this inherits text-align:center from
+     the .screen-center ancestor it's rendered inside (top-layer painting
+     doesn't detach it from the DOM tree for CSS inheritance purposes) */
+  text-align: left;
+  color: var(--text);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 1.25rem;
+  width: min(560px, 92vw);
+  max-height: 85vh;
+  overflow-y: auto;
+}
+
+.rules-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.rules-dialog h2 {
+  margin-top: 0;
+}
+
+.rules-dialog h3 {
+  font-size: 0.95rem;
+  color: var(--text-dim);
+  margin: 1.25rem 0 0.5rem;
+}
+
+.rules-dialog p {
+  color: var(--text);
+  margin: 0 0 0.5rem;
+}
+
+.rules-rounds {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.rules-round {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0.6rem 0.75rem;
+}
+
+.rules-round-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.rules-round p {
+  margin: 0.15rem 0 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+.rules-winner {
+  font-weight: 700;
+}
+
+.rules-dialog form {
+  margin-top: 1rem;
+}

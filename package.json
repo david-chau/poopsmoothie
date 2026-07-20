@@ -1,0 +1,25 @@
+{
+  "name": "poopsmoothie",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Digital Poopsmoothie - real-time party word game",
+  "main": "server/index.js",
+  "scripts": {
+    "dev": "npm run dev:server & npm run dev:client & wait",
+    "dev:server": "nodemon server/index.js",
+    "dev:client": "npm --prefix client run dev",
+    "build:client": "npm --prefix client install && npm --prefix client run build",
+    "start": "node server/index.js",
+    "test": "node --test server/*.test.js",
+    "bots": "node scripts/dev-bots.mjs"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9",
+    "socket.io-client": "^4.8.1"
+  }
+}
