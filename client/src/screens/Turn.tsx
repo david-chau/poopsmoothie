@@ -40,6 +40,7 @@ export default function Turn() {
     ? Math.max(0, Math.round((round.turnEndsAt - (Date.now() + clockOffsetMs)) / 1000))
     : null;
   const scoreFlashTeam = flashEvent?.kind === 'correct' ? flashEvent.team : null;
+  const canPass = state.config.allowSkip[state.phase as 'ROUND1' | 'ROUND2' | 'ROUND3'] ?? true;
 
   async function act(event: 'correct-guess' | 'pass-turn') {
     if (!mySlip || !round.turnId) return;
@@ -125,10 +126,12 @@ export default function Turn() {
             slipKey={mySlip.id}
             flash={flashEvent ? { id: flashEvent.id, kind: flashEvent.kind } : null}
           />
-          <div className="turn-actions">
-            <button className="btn btn-pass" onClick={() => act('pass-turn')}>
-              Pass
-            </button>
+          <div className={canPass ? 'turn-actions' : 'turn-actions turn-actions-single'}>
+            {canPass && (
+              <button className="btn btn-pass" onClick={() => act('pass-turn')}>
+                Pass
+              </button>
+            )}
             <button className="btn btn-correct" onClick={() => act('correct-guess')}>
               Correct!
             </button>

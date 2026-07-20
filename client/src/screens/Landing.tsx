@@ -1,14 +1,29 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import RulesDialog from '../components/RulesDialog';
+
+/** Supports sharing a room as a link (`/join/ABCD`) instead of just the bare
+ * code — the server's catch-all route already serves the SPA for any path,
+ * so this is purely a client-side prefill. */
+function joinCodeFromUrl(): string {
+  const match = window.location.pathname.match(/^\/join\/([A-Za-z0-9]{4})$/);
+  return match ? match[1].toUpperCase() : '';
+}
 
 export default function Landing() {
   const { createRoom, joinRoom } = useGame();
   const [name, setName] = useState(() => localStorage.getItem('poopsmoothie-name') ?? '');
-  const [roomCode, setRoomCode] = useState('');
+  const [roomCode, setRoomCode] = useState(() => joinCodeFromUrl());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const rulesRef = useRef<HTMLDialogElement>(null);
+
+  // clean the URL back to "/" once we've read it — nothing else in this
+  // single-page app cares about the path, and leaving it would just re-parse
+  // stale state on every reload
+  useEffect(() => {
+    if (window.location.pathname !== '/') window.history.replaceState(null, '', '/');
+  }, []);
 
   function rememberName(value: string) {
     setName(value);

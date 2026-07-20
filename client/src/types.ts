@@ -32,7 +32,7 @@ export interface RoundPublic {
 export interface GameState {
   code: string;
   hostId: string;
-  config: { wordsPerPlayer: number; turnSeconds: number };
+  config: { wordsPerPlayer: number; turnSeconds: number; allowSkip: Record<'ROUND1' | 'ROUND2' | 'ROUND3', boolean> };
   phase: Phase;
   players: PlayerPublic[];
   submittedPlayerIds: string[];

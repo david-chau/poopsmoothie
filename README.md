@@ -66,9 +66,34 @@ localhost, e.g. `http://192.168.x.x:5173`. Vite's dev server proxies
 `/socket.io` through to the backend on `:4321` automatically, and binds
 `0.0.0.0` so phones can reach it.
 
-Run `npm test` for the round-engine unit tests (`server/game.test.js`) —
-pool building, scoring, stale-action rejection, timeout/pass mechanics, and
-the per-round slip-reuse/team-alternation rules.
+### Tests
+
+```sh
+npm test          # server + bots: node:test (server/*.test.js, scripts/*.test.mjs)
+npm run test:client  # client: vitest + jsdom (src/**/*.test.tsx)
+npm run test:all     # both of the above (fast, no Docker)
+npm run test:e2e     # full Docker e2e (slow; builds + runs the image)
+```
+
+- **`server/game.test.js`** — round engine: pool, scoring, stale-action
+  rejection, timeout/pass/skip/force-pass, resume time-banking, per-round
+  skip, team alternation, stranded-turn recovery.
+- **`server/rooms.test.js`** — team balance, secret auth, `setTeam`
+  authorization, host transfer, room lifecycle.
+- **`server/persist.test.js`** — atomic save/load round-trip, 24h idle purge,
+  corrupt-file skip.
+- **`server/events.test.js`** — socket integration over a real wire: auth
+  gating, config clamp/merge, join gating, slip secrecy, rejoin.
+- **`scripts/bot.test.mjs`** — bots join, auto-submit, and auto-play a turn
+  end to end against a live server.
+- **`client/src/**/*.test.tsx`** — screen logic: join-link prefill, pass
+  gating, winner/MVP, waiting ratio, start gating, plus `lib` helpers.
+- **`scripts/e2e.mjs`** (`npm run test:e2e`) — against the **real Docker
+  image**: builds it, runs a full game through bots, then does an actual
+  `docker restart` mid-turn and verifies crash recovery (reloads paused,
+  drawer rejoins + resumes). Isolated image/container/port + a temp data dir,
+  so it never touches a running stack or your real `./data`. Skips cleanly if
+  Docker isn't installed.
 
 ### Testing with fewer devices than players
 
@@ -95,9 +120,11 @@ for room persistence.
 
 Room state persists to `./data/rooms/*.json` on the host — survives a
 container restart mid-game; players just reload and rejoin, drawer taps
-Resume. Not yet load-tested beyond dev — worth a real run-through on the NAS
-before a real game night to catch any environment-specific gaps (LAN
-discovery, port conflicts, etc).
+Resume. Rooms are cleaned up automatically: deleted when the last player
+leaves, and any file idle >24h is purged on the next boot, so `data/` doesn't
+grow without bound. Not yet load-tested beyond dev — worth a real run-through
+on the NAS before a real game night to catch any environment-specific gaps
+(LAN discovery, port conflicts, etc).
 
 ## Architecture
 

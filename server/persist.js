@@ -41,13 +41,23 @@ export function deleteRoom(code) {
   }
 }
 
-/** gap #2: load every persisted room back into memory on boot. */
+const MAX_ROOM_AGE_MS = 24 * 60 * 60 * 1000; // 24h since last activity
+
+/** gap #2: load every persisted room back into memory on boot. Stale rooms
+ *  (last activity > 24h ago — a game night that ended and never got cleaned)
+ *  are deleted rather than loaded, so files don't accumulate forever on the NAS. */
 export function loadAllRooms() {
   const loaded = [];
+  const now = Date.now();
   for (const name of fs.readdirSync(ROOMS_DIR)) {
     if (!name.endsWith('.json')) continue;
+    const filePath = path.join(ROOMS_DIR, name);
     try {
-      const raw = JSON.parse(fs.readFileSync(path.join(ROOMS_DIR, name), 'utf8'));
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (raw.lastActivity && now - raw.lastActivity > MAX_ROOM_AGE_MS) {
+        fs.unlinkSync(filePath);
+        continue;
+      }
       const room = deserializeRoom(raw);
       rooms.set(room.code, room);
       loaded.push(room);

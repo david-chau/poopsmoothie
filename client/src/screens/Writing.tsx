@@ -76,7 +76,7 @@ export default function Writing() {
       </div>
       <RulesDialog ref={rulesRef} />
       <h1 className="title">Write {n} words</h1>
-      <p className="subtitle">Nouns, names, phrases — anything guessable. No repeats.</p>
+      <p className="subtitle">Nouns, names, phrases — anything guessable. Keep them varied!</p>
       {values.map((v, i) => (
         <input
           key={i}

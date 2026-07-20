@@ -11,7 +11,10 @@
     "dev:client": "npm --prefix client run dev",
     "build:client": "npm --prefix client install && npm --prefix client run build",
     "start": "node server/index.js",
-    "test": "node --test server/*.test.js",
+    "test": "node --test server/*.test.js scripts/*.test.mjs",
+    "test:client": "npm --prefix client run test",
+    "test:all": "npm test && npm run test:client",
+    "test:e2e": "node --test --test-timeout=300000 scripts/e2e.mjs",
     "bots": "node scripts/dev-bots.mjs"
   },
   "dependencies": {

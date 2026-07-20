@@ -1,6 +1,7 @@
 import { useMemo, type CSSProperties } from 'react';
 
-const COLORS = ['var(--team-a)', 'var(--team-b)', '#facc15', '#34d399', '#f472b6'];
+// Muted to match the app's softer palette — no neon yellow/green/pink.
+const COLORS = ['var(--team-a)', 'var(--team-b)', '#e0c169', '#7bc4a0', '#dd9fc0'];
 
 interface Particle {
   id: number;

@@ -21,7 +21,9 @@ export function newRoom() {
     createdAt: Date.now(),
     lastActivity: Date.now(),
     hostId: null,
-    config: { wordsPerPlayer: 5, turnSeconds: 60 },
+    // Pass/skip enabled per round by default — off for Password (round 3):
+    // one-word clues don't leave much room for "come back to this one later".
+    config: { wordsPerPlayer: 5, turnSeconds: 60, allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false } },
     players: new Map(), // playerId -> { id, secret, name, team, connected, socketId }
     phase: 'LOBBY', // LOBBY -> WRITING -> ROUND1 -> ROUND2 -> ROUND3 -> SCORES
     submissions: {}, // playerId -> string[]
@@ -52,6 +54,11 @@ export function newRoom() {
 
 export function getRoom(code) {
   return rooms.get((code || '').toUpperCase());
+}
+
+/** Evict a room from memory (disk removal is persist.deleteRoom's job). */
+export function destroyRoom(code) {
+  rooms.delete(code);
 }
 
 export function addPlayer(room, name) {

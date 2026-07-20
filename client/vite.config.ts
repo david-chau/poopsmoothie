@@ -1,9 +1,15 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: './src/test-setup.ts',
+  },
   server: {
     host: true, // bind 0.0.0.0, not just localhost — needed to reach it from phones on LAN
     // dev-only: client runs on :5173, server on :4321. socket.ts connects

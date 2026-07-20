@@ -2,7 +2,10 @@ import { useRef, useState, type KeyboardEvent } from 'react';
 import { useGame } from '../GameContext';
 import { emitAck } from '../socket';
 import { copyText } from '../lib';
-import { TEAM_LABELS, TEAM_CLASS, type Team } from '../types';
+import { TEAM_LABELS, TEAM_CLASS, ROUND_LABELS, ROUND_ICONS, type Team } from '../types';
+
+const SKIP_ROUNDS = ['ROUND1', 'ROUND2', 'ROUND3'] as const;
+type SkipRound = (typeof SKIP_ROUNDS)[number];
 import RulesDialog from '../components/RulesDialog';
 
 export default function Lobby() {
@@ -31,10 +34,16 @@ export default function Lobby() {
     setError(res.ok ? null : (res.error ?? 'could not change team'));
   }
 
-  async function updateConfig(patch: Partial<{ wordsPerPlayer: number; turnSeconds: number }>) {
+  async function updateConfig(
+    patch: Partial<{ wordsPerPlayer: number; turnSeconds: number; allowSkip: Partial<Record<SkipRound, boolean>> }>,
+  ) {
     const res = await emitAck<{ ok: boolean; error?: string }>('set-config', patch);
     setError(res.ok ? null : (res.error ?? 'could not update settings'));
     return res.ok;
+  }
+
+  async function toggleAllowSkip(round: SkipRound) {
+    await updateConfig({ allowSkip: { [round]: !state.config.allowSkip[round] } });
   }
 
   async function commitWordsPerPlayer() {
@@ -58,8 +67,10 @@ export default function Lobby() {
     setError(res.ok ? null : (res.error ?? 'could not start'));
   }
 
-  async function copyCode() {
-    const ok = await copyText(state.code);
+  async function copyInviteLink() {
+    // a link is easier to share/tap than reading out a 4-letter code
+    const url = `${window.location.origin}/join/${state.code}`;
+    const ok = await copyText(url);
     if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
@@ -103,7 +114,7 @@ export default function Lobby() {
       <div className="room-code-block">
         <div className="room-code-row">
           <h1 className="room-code">{state.code}</h1>
-          <button className="copy-btn" onClick={copyCode} aria-label="Copy room code" title="Copy room code">
+          <button className="copy-btn" onClick={copyInviteLink} aria-label="Copy invite link" title="Copy invite link">
             {copied ? '✅' : '📋'}
           </button>
         </div>
@@ -142,6 +153,17 @@ export default function Lobby() {
               onKeyDown={blurOnEnter}
             />
           </label>
+          <div className="field">
+            <span>Allow pass</span>
+            <div className="skip-toggle-group">
+              {SKIP_ROUNDS.map((round) => (
+                <label key={round} className="skip-toggle">
+                  <input type="checkbox" checked={state.config.allowSkip[round]} onChange={() => toggleAllowSkip(round)} />
+                  {ROUND_ICONS[round]} {ROUND_LABELS[round]}
+                </label>
+              ))}
+            </div>
+          </div>
           <button className="btn btn-primary" onClick={startGame} disabled={connectedCount < 4}>
             Start game {connectedCount < 4 && `(need ${4 - connectedCount} more)`}
           </button>

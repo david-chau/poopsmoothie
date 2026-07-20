@@ -182,6 +182,7 @@ export function correctGuess(room, playerId, slipId, turnId) {
 export function passTurn(room, playerId, slipId, turnId) {
   const check = validateAction(room, playerId, slipId, turnId);
   if (!check.ok) return check;
+  if (room.config.allowSkip?.[room.phase] === false) return { ok: false, error: 'pass is disabled this round' };
   room.round.remaining.push(room.round.currentSlipId); // bottom of the stack
   return afterSlipResolved(room);
 }
@@ -243,12 +244,29 @@ export function endTurnIfRoundOver(room, roundEnded) {
 // --- Disconnect / pause / resume / skip (gaps #2, #3, #5, #C, #V) ----------
 
 export function pauseForDisconnectedDrawer(room) {
-  if (!room.round.turnEndsAt) return; // awaiting-start: nothing running to pause
   clearTimer(room);
-  room.round.remainingMsAtPause = room.round.turnEndsAt - Date.now();
+  // mid-turn: bank the time left. awaiting-start (no turnEndsAt yet): leave
+  // remainingMsAtPause null so resume gives a full turn. Either way mark it
+  // paused so the UI shows a "waiting for X" banner instead of silently
+  // stalling on a drawer who's never going to tap start.
+  room.round.remainingMsAtPause = room.round.turnEndsAt ? room.round.turnEndsAt - Date.now() : null;
   room.round.turnEndsAt = null;
   room.round.paused = true;
   room.round.pauseReason = 'drawer-disconnected';
+}
+
+/** When a round pause was 'no-connected-players' (a turn transition landed
+ *  while both teams were fully offline) and someone has since reconnected,
+ *  reassign a drawer so the game isn't stuck forever. Only touches that
+ *  specific stranded state — a normal 'drawer-disconnected' pause still waits
+ *  for that drawer or a host skip. Safe re: the in-hand slip: the
+ *  no-connected-players state is only ever reached from advanceToNextDrawer,
+ *  at which point there is no slip in hand. Returns true if it recovered. */
+export function recoverStrandedTurn(room) {
+  if (!ROUND_PHASES.includes(room.phase)) return false;
+  if (room.round.pauseReason !== 'no-connected-players') return false;
+  advanceToNextDrawer(room, { toggleTeam: false });
+  return !room.round.paused;
 }
 
 /** gap #2: on boot, never trust a persisted turnEndsAt — force a pause and

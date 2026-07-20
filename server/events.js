@@ -108,6 +108,11 @@ export function registerSocketHandlers(io, socket) {
     socket.data.roomCode = room.code;
     socket.data.playerId = player.id;
     socket.join(room.code);
+    // if the host was offline, hand host to whoever's back — otherwise a turn
+    // paused on a disconnected drawer can't be skipped (host-only) and the
+    // game is stuck until the exact original host/drawer happens to return.
+    rooms.transferHostIfNeeded(room);
+    game.recoverStrandedTurn(room); // and un-stick a fully-offline round if that's the state
     persistAndBroadcast(io, room);
     sendSlipToDrawer(io, room); // gap #B: drawer gets their word back
     ack?.({ ok: true, roomCode: room.code, playerId: player.id });
@@ -131,6 +136,11 @@ export function registerSocketHandlers(io, socket) {
     // `!= null` not truthiness — 0 is a valid (if nonsensical) input and should still clamp, not be ignored
     if (config.wordsPerPlayer != null) ctx.room.config.wordsPerPlayer = Math.max(1, Math.min(20, +config.wordsPerPlayer));
     if (config.turnSeconds != null) ctx.room.config.turnSeconds = Math.max(10, Math.min(300, +config.turnSeconds));
+    if (config.allowSkip && typeof config.allowSkip === 'object') {
+      for (const phase of ROUND_PHASES) {
+        if (config.allowSkip[phase] != null) ctx.room.config.allowSkip[phase] = !!config.allowSkip[phase];
+      }
+    }
     persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
   });
@@ -254,11 +264,18 @@ export function registerSocketHandlers(io, socket) {
     if (!ctx) return ack?.({ ok: true });
     const wasDrawer = ROUND_PHASES.includes(ctx.room.phase) && ctx.room.round.drawerId === ctx.player.id;
     rooms.removePlayer(ctx.room, ctx.player.id); // voluntary leave: drop the slot, not just mark offline
-    if (wasDrawer) game.skipDrawer(ctx.room); // they're gone for good, don't leave the turn paused forever
-    persistAndBroadcast(io, ctx.room);
     socket.leave(ctx.room.code);
     delete socket.data.roomCode;
     delete socket.data.playerId;
+    // last one out: tear the room down instead of leaving an empty husk in
+    // memory and on disk forever (nobody to broadcast to, either).
+    if (ctx.room.players.size === 0) {
+      rooms.destroyRoom(ctx.room.code);
+      persist.deleteRoom(ctx.room.code);
+      return ack?.({ ok: true });
+    }
+    if (wasDrawer) game.skipDrawer(ctx.room); // they're gone for good, don't leave the turn paused forever
+    persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
   });
 
