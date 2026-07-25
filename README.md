@@ -29,6 +29,10 @@ Then pull and run the published image (no source checkout, no build step):
 docker compose -f docker-compose.prod.yml up -d
 ```
 
+That pulls **`ghcr.io/david-chau/poopsmoothie:latest`** — multi-arch
+(amd64 + arm64), so Intel and ARM boxes both work. Published builds are listed
+[here](https://github.com/users/david-chau/packages/container/poopsmoothie/versions).
+
 Find the host's LAN IP to share — macOS: `ipconfig getifaddr en0`; Linux:
 `hostname -I`; or check your router's device list. Everyone browses to
 `http://<that-ip>:4321`.

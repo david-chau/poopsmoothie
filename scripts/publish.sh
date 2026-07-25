@@ -10,14 +10,22 @@
 # `version` defaults to a timestamp; :latest is always updated too.
 set -euo pipefail
 
-USER="${1:-${GHCR_USER:-}}"
-if [ -z "$USER" ]; then
+# the build context below is `.`, so run from the repo root no matter where
+# this was invoked from (`cd scripts && ./publish.sh` used to fail on a
+# missing Dockerfile)
+cd "$(dirname "$0")/.."
+
+# The account comes from GHCR_USER only. It used to also accept $1, which
+# silently beat the env var — `./publish.sh latest` meant "user = latest" and
+# would have pushed to ghcr.io/latest/poopsmoothie.
+gh_user="${GHCR_USER:-}"
+if [ -z "$gh_user" ]; then
   echo "usage: GHCR_USER=<your-gh-user> $0 [version]" >&2
   exit 1
 fi
-VERSION="${2:-$(date +%Y%m%d-%H%M)}"
+version="${1:-$(date +%Y%m%d-%H%M)}"
 # GHCR requires an all-lowercase path
-IMAGE="ghcr.io/$(echo "$USER" | tr '[:upper:]' '[:lower:]')/poopsmoothie"
+IMAGE="ghcr.io/$(echo "$gh_user" | tr '[:upper:]' '[:lower:]')/poopsmoothie"
 
 # multi-arch needs the docker-container buildx driver (the default docker
 # driver can't emit a multi-platform manifest)
@@ -26,13 +34,21 @@ if ! docker buildx inspect ps-builder >/dev/null 2>&1; then
 fi
 docker buildx use ps-builder
 
+# `publish.sh latest` would otherwise pass the same -t twice
+tags=(-t "${IMAGE}:${version}")
+[ "$version" = latest ] || tags+=(-t "${IMAGE}:latest")
+
+echo "publishing ${IMAGE}:${version} from $(pwd)"
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t "${IMAGE}:${VERSION}" \
-  -t "${IMAGE}:latest" \
+  "${tags[@]}" \
   --push \
   .
 
 echo
-echo "pushed ${IMAGE}:${VERSION}  (+ :latest)"
+if [ "$version" = latest ]; then
+  echo "pushed ${IMAGE}:latest"
+else
+  echo "pushed ${IMAGE}:${version}  (+ :latest)"
+fi
 echo "on the NAS:  PS_IMAGE=${IMAGE}:latest docker compose -f docker-compose.prod.yml up -d"
