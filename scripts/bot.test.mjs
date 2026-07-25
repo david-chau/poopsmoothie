@@ -9,7 +9,8 @@ import { io as ioClient } from 'socket.io-client';
 
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-bots-'));
 const { registerSocketHandlers } = await import('../server/events.js');
-const { createBot } = await import('./bot.mjs');
+const { createBot } = await import('../server/bot.js');
+const bots = await import('../server/bots.js');
 
 let httpServer;
 let io;
@@ -22,10 +23,12 @@ before(async () => {
   io.on('connection', (socket) => registerSocketHandlers(io, socket));
   await new Promise((r) => httpServer.listen(0, r));
   url = `http://localhost:${httpServer.address().port}`;
+  process.env.SELF_URL = url; // where host-spawned bots dial back in
 });
 
 after(() => {
   cleanup.forEach((fn) => fn());
+  bots.removeAllBots(); // host-spawned bots aren't in `cleanup` — their sockets would hang the run
   io.close();
   httpServer.close();
 });
@@ -100,4 +103,86 @@ test('bots auto-submit words and auto-play a turn end to end', async () => {
     4000,
   );
   assert.ok(state.teamScores.B > teamBScoreBefore, 'a bot auto-played its turn and scored');
+});
+
+test('host can add bots from the UI and they show up flagged as bots', async () => {
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  await ack(host, 'create-room', { name: 'Host' });
+
+  const added = await ack(host, 'add-bots', { count: 3 });
+  assert.equal(added.ok, true);
+
+  await until(
+    () => state,
+    (s) => s.players.length === 4,
+  );
+  const bots = state.players.filter((p) => p.isBot);
+  assert.equal(bots.length, 3);
+  assert.equal(state.players.find((p) => p.id === state.hostId).isBot, false); // the human isn't
+  assert.deepEqual(
+    bots.map((p) => p.name).sort(),
+    ['Bot 1', 'Bot 2', 'Bot 3'], // distinct names even though the joins race
+  );
+
+  const removed = await ack(host, 'remove-bots');
+  assert.equal(removed.removed, 3);
+  await until(
+    () => state,
+    (s) => s.players.length === 1,
+  );
+});
+
+test('add-bots is host-only, lobby-only, and capped', async () => {
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+
+  const guest = await connect();
+  await ack(guest, 'join-room', { roomCode: create.roomCode, name: 'Guest' });
+  assert.equal((await ack(guest, 'add-bots', { count: 1 })).ok, false); // not the host
+
+  // a silly count clamps to MAX_BOTS_PER_CALL rather than erroring...
+  const clamped = await ack(host, 'add-bots', { count: 99 });
+  assert.equal(clamped.ok, true);
+  await until(
+    () => state,
+    (s) => s.players.length === 8, // host + guest + 6
+  );
+  // ...but the room-wide cap does refuse once there's no space left
+  const overCap = await ack(host, 'add-bots', { count: 6 });
+  assert.equal(overCap.ok, false);
+  assert.match(overCap.error, /at most/);
+
+  await ack(host, 'start-game');
+  await until(
+    () => state,
+    (s) => s.phase === 'WRITING',
+  );
+  const afterStart = await ack(host, 'add-bots', { count: 1 });
+  assert.equal(afterStart.ok, false); // lobby only — join-room won't take them now
+  assert.match(afterStart.error, /lobby/);
+
+  await ack(host, 'remove-bots');
+});
+
+test('the last human out takes the bots (and the room) with them', async () => {
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  await ack(host, 'add-bots', { count: 2 });
+  await until(
+    () => state,
+    (s) => s.players.length === 3,
+  );
+
+  await ack(host, 'leave-room');
+  // room is gone: a fresh socket can't join it any more
+  const stray = await connect();
+  const rejoin = await ack(stray, 'join-room', { roomCode: create.roomCode, name: 'Late' });
+  assert.equal(rejoin.ok, false);
+  assert.match(rejoin.error, /not found/);
 });

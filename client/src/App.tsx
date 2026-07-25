@@ -6,6 +6,8 @@ import Lobby from './screens/Lobby';
 import Writing from './screens/Writing';
 import Turn from './screens/Turn';
 import Scores from './screens/Scores';
+import MyNameBadge from './components/MyNameBadge';
+import Toast from './components/Toast';
 
 export default function App() {
   const { state, identity } = useGame();
@@ -40,6 +42,10 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <Toast />
+      {/* outside AnimatePresence on purpose: identity is shell chrome, it
+          shouldn't slide out and back in on every phase change */}
+      <MyNameBadge />
       {/* Sequential slide, not an overlapping crossfade: screens vary wildly in
           height (Landing vs a long scrollable Scores list), so the old screen
           fully exits left before the new one enters from the right — a clean

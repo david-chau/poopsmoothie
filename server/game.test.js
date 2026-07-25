@@ -322,3 +322,190 @@ test('endGameNow jumps straight to SCORES', () => {
   assert.equal(room.phase, 'SCORES');
   assert.equal(room.round.timeoutHandle, null); // timer cleared
 });
+
+// --- host patch controls ----------------------------------------------------
+
+test('revert-last-guess un-scores the slip and puts it back on top of the pile', () => {
+  const { room, players } = setup();
+  const drawer = players[0];
+  game.startTurn(room, drawer.id, () => {});
+  const slipId = room.round.currentSlipId;
+  game.correctGuess(room, drawer.id, slipId, room.round.turnId);
+  assert.equal(room.teamScores.A, 1);
+  const remainingBefore = room.round.remaining.length;
+
+  const result = game.revertLastGuess(room);
+  assert.equal(result.ok, true);
+  assert.equal(room.teamScores.A, 0);
+  assert.equal(room.round.guessed.length, 0);
+  assert.equal(room.pool[slipId].scoredBy.length, 0);
+  assert.equal(room.round.remaining.length, remainingBefore + 1);
+  assert.equal(room.round.remaining[0], slipId); // next one up
+  stopTimer(room);
+});
+
+test('revert-last-guess debits the team that scored, not whoever is active now', () => {
+  const { room, players } = setup();
+  const drawer = players[0]; // team A
+  game.startTurn(room, drawer.id, () => {});
+  game.correctGuess(room, drawer.id, room.round.currentSlipId, room.round.turnId);
+  game.forcePassTeam(room); // active team is now B
+  assert.equal(room.activeTeam, 'B');
+
+  game.revertLastGuess(room);
+  assert.equal(room.teamScores.A, 0);
+  assert.equal(room.teamScores.B, 0); // B never scored it, must not go negative
+  stopTimer(room);
+});
+
+test('revert-last-guess refuses when nothing was scored this round', () => {
+  const { room } = setup();
+  const result = game.revertLastGuess(room);
+  assert.equal(result.ok, false);
+  stopTimer(room);
+});
+
+test('set-drawer hands the turn over, returns the in-hand slip, and switches team', () => {
+  const { room, players } = setup();
+  const drawer = players[0]; // team A
+  game.startTurn(room, drawer.id, () => {});
+  const inHand = room.round.currentSlipId;
+  const oldTurnId = room.round.turnId;
+  const target = players.find((p) => room.players.get(p.id).team === 'B');
+
+  const result = game.setDrawer(room, target.id);
+  assert.equal(result.ok, true);
+  assert.equal(room.round.drawerId, target.id);
+  assert.equal(room.activeTeam, 'B');
+  assert.equal(room.round.currentSlipId, null);
+  assert.equal(room.round.turnEndsAt, null);
+  assert.notEqual(room.round.turnId, oldTurnId); // stale taps from the old drawer die
+  assert.ok(room.round.remaining.includes(inHand));
+  stopTimer(room);
+});
+
+test('set-drawer rejects unknown and offline players', () => {
+  const { room, players } = setup();
+  assert.equal(game.setDrawer(room, 'nobody').ok, false);
+  room.players.get(players[1].id).connected = false;
+  assert.equal(game.setDrawer(room, players[1].id).ok, false);
+  stopTimer(room);
+});
+
+test('set-slip-scorer re-attributes a word and the team score follows', () => {
+  const { room, players } = setup();
+  const drawer = players[0]; // team A
+  game.startTurn(room, drawer.id, () => {});
+  const slipId = room.round.currentSlipId;
+  game.correctGuess(room, drawer.id, slipId, room.round.turnId);
+  assert.deepEqual(room.teamScores, { A: 1, B: 0 });
+
+  // actually it was a team B player who got it
+  const teamB = players.find((p) => room.players.get(p.id).team === 'B');
+  assert.equal(game.setSlipScorer(room, slipId, 1, teamB.id).ok, true);
+  assert.deepEqual(room.teamScores, { A: 0, B: 1 }); // moved, not double-counted
+  assert.equal(room.pool[slipId].scoredBy.length, 1); // replaced, not appended
+
+  // nobody got it after all
+  assert.equal(game.setSlipScorer(room, slipId, 1, null).ok, true);
+  assert.deepEqual(room.teamScores, { A: 0, B: 0 });
+  assert.equal(room.pool[slipId].scoredBy.length, 0);
+  stopTimer(room);
+});
+
+test('set-slip-scorer rejects bad slip, round, and player', () => {
+  const { room, players } = setup();
+  const slipId = Object.keys(room.pool)[0];
+  assert.equal(game.setSlipScorer(room, 'nope', 1, players[0].id).ok, false);
+  assert.equal(game.setSlipScorer(room, slipId, 0, players[0].id).ok, false);
+  assert.equal(game.setSlipScorer(room, slipId, 4, players[0].id).ok, false);
+  assert.equal(game.setSlipScorer(room, slipId, 1, 'ghost').ok, false);
+  stopTimer(room);
+});
+
+test('re-attributing an earlier round also rewrites that round’s banked delta', () => {
+  const { room, players } = setup(1); // 4 slips, one per player
+  // burn through round 1 entirely so it gets banked into roundScores
+  let guard = 0;
+  while (room.phase === 'ROUND1' && guard++ < 50) {
+    const drawerId = room.round.drawerId;
+    if (!room.round.turnEndsAt) game.startTurn(room, drawerId, () => {});
+    if (!room.round.currentSlipId) break;
+    const res = game.correctGuess(room, drawerId, room.round.currentSlipId, room.round.turnId);
+    game.endTurnIfRoundOver(room, res.roundEnded); // events.js does this for real callers
+  }
+  assert.equal(room.phase, 'ROUND2');
+  assert.equal(room.roundScores.length, 1);
+  const banked = { ...room.roundScores[0] };
+  assert.equal(banked.A + banked.B, 4);
+
+  // flip one round-1 word to the other team
+  const slip = Object.values(room.pool).find((s) => s.scoredBy?.some((e) => e.round === 1));
+  const hit = slip.scoredBy.find((e) => e.round === 1);
+  const other = players.find((p) => room.players.get(p.id).team !== hit.team);
+  game.setSlipScorer(room, slip.id, 1, other.id);
+
+  assert.equal(room.roundScores[0].A + room.roundScores[0].B, 4); // still 4 slips
+  assert.notDeepEqual(room.roundScores[0], banked); // but the split moved
+  assert.deepEqual(room.teamScores, room.roundScores[0]); // only round 1 scored so far
+  stopTimer(room);
+});
+
+test('host pause stops the clock and only the host can lift it', () => {
+  const { room, players } = setup();
+  const drawer = players[0];
+  game.startTurn(room, drawer.id, () => {});
+
+  assert.equal(game.hostPause(room).ok, true);
+  assert.equal(room.round.paused, true);
+  assert.equal(room.round.pauseReason, 'host-paused');
+  assert.equal(room.round.turnEndsAt, null);
+  assert.ok(room.round.remainingMsAtPause > 0); // banked, not discarded
+  assert.equal(game.hostPause(room).ok, false); // already paused
+
+  // a non-drawer non-host still can't resume
+  assert.equal(game.resumeTurn(room, players[1].id, () => {}).ok, false);
+  // the host can, even though they aren't the drawer
+  assert.equal(game.resumeTurn(room, players[1].id, () => {}, { isHost: true }).ok, true);
+  assert.equal(room.round.paused, false);
+  stopTimer(room);
+});
+
+test('host cannot use the host-resume path to lift a disconnect pause', () => {
+  const { room, players } = setup();
+  const drawer = players[0];
+  game.startTurn(room, drawer.id, () => {});
+  game.pauseForDisconnectedDrawer(room);
+
+  const result = game.resumeTurn(room, players[1].id, () => {}, { isHost: true });
+  assert.equal(result.ok, false); // still the drawer's call
+  stopTimer(room);
+});
+
+test('a hot-joiner is added to the rotation and eventually draws', () => {
+  const { room } = setup();
+  const late = rooms.addPlayer(room, 'Late');
+  const before = [...room.turnOrder[late.team]];
+  assert.ok(!before.includes(late.id), 'not in the snapshot taken at round start');
+
+  game.addLatePlayer(room, late);
+  assert.deepEqual(room.turnOrder[late.team], [...before, late.id]); // appended, order intact
+
+  // skipDrawer keeps the same team, so rotating it enough times must reach them
+  room.activeTeam = late.team;
+  const seen = new Set();
+  for (let i = 0; i < room.turnOrder[late.team].length + 1; i++) {
+    game.skipDrawer(room);
+    seen.add(room.round.drawerId);
+  }
+  assert.ok(seen.has(late.id), 'hot-joiner gets a turn');
+  stopTimer(room);
+});
+
+test('addLatePlayer is idempotent and safe before the order exists', () => {
+  const room = rooms.newRoom();
+  const p = rooms.addPlayer(room, 'Early');
+  game.addLatePlayer(room, p); // LOBBY: buildTurnOrder will pick them up anyway
+  game.addLatePlayer(room, p);
+  assert.equal(room.turnOrder[p.team].filter((id) => id === p.id).length, 1);
+});

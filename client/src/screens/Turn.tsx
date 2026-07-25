@@ -4,6 +4,7 @@ import { emitAck } from '../socket';
 import { ROUND_LABELS, ROUND_ICONS, TEAM_LABELS, TEAM_CLASS, type Team } from '../types';
 import PaperSlip from '../components/PaperSlip';
 import PlayerName from '../components/PlayerName';
+import AdminDrawer from '../components/AdminDrawer';
 
 interface FlashEvent {
   id: number;
@@ -41,6 +42,7 @@ export default function Turn() {
     : null;
   const scoreFlashTeam = flashEvent?.kind === 'correct' ? flashEvent.team : null;
   const canPass = state.config.allowSkip[state.phase as 'ROUND1' | 'ROUND2' | 'ROUND3'] ?? true;
+  const hostPaused = round.paused && round.pauseReason === 'host-paused';
 
   async function act(event: 'correct-guess' | 'pass-turn') {
     if (!mySlip || !round.turnId) return;
@@ -58,16 +60,6 @@ export default function Turn() {
   async function resumeTurn() {
     const res = await emitAck<{ ok: boolean; error?: string }>('resume-turn');
     setError(res.ok ? null : (res.error ?? 'could not resume'));
-  }
-
-  async function skipDrawer() {
-    const res = await emitAck<{ ok: boolean; error?: string }>('skip-drawer');
-    setError(res.ok ? null : (res.error ?? 'could not skip'));
-  }
-
-  async function forcePassTeam() {
-    const res = await emitAck<{ ok: boolean; error?: string }>('force-pass-team');
-    setError(res.ok ? null : (res.error ?? 'could not pass turn'));
   }
 
   return (
@@ -97,10 +89,16 @@ export default function Turn() {
 
       {round.paused && (
         <div className="card banner">
-          <p>
-            Paused — waiting for <PlayerName state={state} playerId={round.drawerId} />.
-          </p>
-          {isDrawer && (
+          {hostPaused ? (
+            <p>Paused by the host.</p>
+          ) : (
+            <p>
+              Paused — waiting for <PlayerName state={state} playerId={round.drawerId} />.
+            </p>
+          )}
+          {/* a host pause is the host's to lift, so they get the button too —
+              the drawer may well be the reason the game was stopped */}
+          {(isDrawer || (hostPaused && isHost)) && (
             <button className="btn btn-primary" onClick={resumeTurn}>
               Resume
             </button>
@@ -153,12 +151,7 @@ export default function Turn() {
 
       {isHost && (
         <div className="host-escape-hatches">
-          <button className="link-btn skip-link" onClick={skipDrawer}>
-            Skip stuck drawer
-          </button>
-          <button className="link-btn skip-link" onClick={forcePassTeam}>
-            Force pass to other team
-          </button>
+          <AdminDrawer />
         </div>
       )}
 

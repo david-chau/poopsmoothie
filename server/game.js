@@ -54,6 +54,15 @@ function buildTurnOrder(room) {
   room.turnPointer = { A: 0, B: 0 };
 }
 
+/** buildTurnOrder snapshots the roster once, at WRITING -> ROUND1, so anyone
+ *  who hot-joins after that isn't in the rotation and would never draw.
+ *  Appended to the end of their team's list, leaving the current cycle intact.
+ *  A no-op before the snapshot exists — buildTurnOrder will pick them up. */
+export function addLatePlayer(room, player) {
+  const list = room.turnOrder?.[player.team];
+  if (list && !list.includes(player.id)) list.push(player.id);
+}
+
 export function startWriting(room) {
   room.phase = 'WRITING';
   room.submissions = {};
@@ -74,8 +83,36 @@ export function beginRound1(room) {
 function startRound(room, { toggleTeam = false } = {}) {
   room.round.remaining = shuffle(Object.keys(room.pool));
   room.round.guessed = [];
-  room.roundStartScores = { ...room.teamScores };
   advanceToNextDrawer(room, { toggleTeam });
+}
+
+// --- Scores are derived, never accumulated --------------------------------
+//
+// `pool[].scoredBy` is the single source of truth for who scored what. Keeping
+// a separate running counter meant any correction (revert, re-attribution) had
+// to remember to adjust it too, and the two could silently drift apart.
+// teamScores/roundScores are caches recomputed from the pool on every change,
+// so the broadcast shape stays the same for the client.
+
+function tallyPool(room) {
+  const total = { A: 0, B: 0 };
+  const byRound = ROUND_PHASES.map(() => ({ A: 0, B: 0 }));
+  for (const slip of Object.values(room.pool)) {
+    for (const entry of slip.scoredBy ?? []) {
+      total[entry.team] += 1;
+      const bucket = byRound[entry.round - 1];
+      if (bucket) bucket[entry.team] += 1;
+    }
+  }
+  return { total, byRound };
+}
+
+/** Re-derive teamScores, and every already-banked round's delta, from the pool. */
+export function recomputeScores(room) {
+  const { total, byRound } = tallyPool(room);
+  room.teamScores = total;
+  // length is "rounds completed so far" — preserve it, refresh the contents
+  room.roundScores = room.roundScores.map((_, i) => ({ ...byRound[i] }));
 }
 
 /** Find the next connected drawer for `team`, rotating that team's pointer.
@@ -170,12 +207,13 @@ export function correctGuess(room, playerId, slipId, turnId) {
   const check = validateAction(room, playerId, slipId, turnId);
   if (!check.ok) return check;
   room.round.guessed.push(room.round.currentSlipId);
-  room.teamScores[room.activeTeam] += 1;
-  // per-slip attribution for the end-of-game recap ("scored by"); a slip
-  // reused across rounds can be guessed by a different team each round.
+  // per-slip attribution drives both the end-of-game recap and the score
+  // itself; a slip reused across rounds can be guessed by a different team
+  // each round.
   const slip = room.pool[room.round.currentSlipId];
   slip.scoredBy ??= [];
   slip.scoredBy.push({ round: ROUND_PHASES.indexOf(room.phase) + 1, team: room.activeTeam, playerId });
+  recomputeScores(room);
   return afterSlipResolved(room);
 }
 
@@ -216,13 +254,12 @@ function endTurnAndAdvance(room) {
 
 function finishRound(room) {
   clearTimer(room);
-  const delta = {
-    A: room.teamScores.A - room.roundStartScores.A,
-    B: room.teamScores.B - room.roundStartScores.B,
-  };
-  room.roundScores.push(delta);
-  // gap #F: leftover time is discarded, deliberately (documented deviation).
   const idx = ROUND_PHASES.indexOf(room.phase);
+  // grow the banked-rounds list by one, then let recompute fill in every
+  // entry from the pool (so a later re-attribution updates this round too)
+  room.roundScores.push({ A: 0, B: 0 });
+  recomputeScores(room);
+  // gap #F: leftover time is discarded, deliberately (documented deviation).
   if (idx === ROUND_PHASES.length - 1) {
     room.phase = 'SCORES'; // also functions as END: pool + authors now safe to reveal
     room.round.drawerId = null;
@@ -243,16 +280,29 @@ export function endTurnIfRoundOver(room, roundEnded) {
 
 // --- Disconnect / pause / resume / skip (gaps #2, #3, #5, #C, #V) ----------
 
-export function pauseForDisconnectedDrawer(room) {
+/** Shared pause mechanics. mid-turn: bank the time left. awaiting-start (no
+ *  turnEndsAt yet): leave remainingMsAtPause null so resume gives a full turn.
+ *  Either way mark it paused so the UI shows a banner instead of silently
+ *  stalling on a drawer who's never going to tap start. */
+function pauseTurn(room, reason) {
   clearTimer(room);
-  // mid-turn: bank the time left. awaiting-start (no turnEndsAt yet): leave
-  // remainingMsAtPause null so resume gives a full turn. Either way mark it
-  // paused so the UI shows a "waiting for X" banner instead of silently
-  // stalling on a drawer who's never going to tap start.
   room.round.remainingMsAtPause = room.round.turnEndsAt ? room.round.turnEndsAt - Date.now() : null;
   room.round.turnEndsAt = null;
   room.round.paused = true;
-  room.round.pauseReason = 'drawer-disconnected';
+  room.round.pauseReason = reason;
+}
+
+export function pauseForDisconnectedDrawer(room) {
+  pauseTurn(room, 'drawer-disconnected');
+}
+
+/** Host emergency stop — identical mechanics to a disconnect pause, different
+ *  reason so the UI says "paused by host" and the host (not just the drawer)
+ *  is allowed to lift it again. */
+export function hostPause(room) {
+  if (room.round.paused) return { ok: false, error: 'already paused' };
+  pauseTurn(room, 'host-paused');
+  return { ok: true };
 }
 
 /** When a round pause was 'no-connected-players' (a turn transition landed
@@ -284,8 +334,13 @@ export function pauseForBootRecovery(room) {
   room.round.pauseReason = 'server-restarted';
 }
 
-export function resumeTurn(room, playerId, onTimeout) {
-  if (room.round.drawerId !== playerId) return { ok: false, error: 'only the drawer can resume' };
+export function resumeTurn(room, playerId, onTimeout, { isHost = false } = {}) {
+  // a host-triggered pause is the host's to lift — otherwise an emergency stop
+  // called while the drawer is away from their phone can't be undone.
+  const hostLiftingOwnPause = isHost && room.round.pauseReason === 'host-paused';
+  if (room.round.drawerId !== playerId && !hostLiftingOwnPause) {
+    return { ok: false, error: 'only the drawer can resume' };
+  }
   if (!room.round.paused) return { ok: false, error: 'not paused' };
   const ms = room.round.remainingMsAtPause || room.config.turnSeconds * 1000;
   // no slip in hand after boot/disconnect pause with none drawn yet -> draw one
@@ -323,4 +378,66 @@ export function forcePassTeam(room) {
 export function endGameNow(room) {
   clearTimer(room);
   room.phase = 'SCORES';
+}
+
+// --- Host patch controls ----------------------------------------------------
+
+/** Undo a slip marked correct by mistake, and put it back in play. Scoped to
+ *  the live round: round.guessed is reset by startRound, so anything still in
+ *  it was scored this round. (Fixing an *older* round's attribution is what
+ *  setSlipScorer is for.) */
+export function revertLastGuess(room) {
+  if (!ROUND_PHASES.includes(room.phase)) return { ok: false, error: 'no round in progress' };
+  const slipId = room.round.guessed.pop();
+  if (!slipId) return { ok: false, error: 'nothing to revert this round' };
+  const slip = room.pool[slipId];
+  slip?.scoredBy?.pop(); // drop the attribution; the score falls out of the tally
+  recomputeScores(room);
+  room.round.remaining.unshift(slipId); // back on top, so it comes up again next
+  return { ok: true, text: slip?.text ?? null };
+}
+
+/** Re-attribute one already-guessed slip for one round: who actually got it,
+ *  or nobody (`playerId: null`) to un-score it. The team follows the player, so
+ *  the host never sets a team score directly — it's always derived from who
+ *  guessed what, which is the thing people actually remember arguing about. */
+export function setSlipScorer(room, slipId, roundNumber, playerId) {
+  const slip = room.pool[slipId];
+  if (!slip) return { ok: false, error: 'word not found' };
+  const round = Math.trunc(Number(roundNumber));
+  if (!(round >= 1 && round <= ROUND_PHASES.length)) return { ok: false, error: 'invalid round' };
+
+  slip.scoredBy = (slip.scoredBy ?? []).filter((e) => e.round !== round);
+  if (playerId) {
+    const player = room.players.get(playerId);
+    if (!player) return { ok: false, error: 'player not found' };
+    slip.scoredBy.push({ round, team: player.team, playerId });
+  }
+  recomputeScores(room);
+  return { ok: true };
+}
+
+/** Hand the current turn to a specific player (wrong person went, someone drew
+ *  out of order). Any in-hand slip returns to the bag and the turn restarts
+ *  awaiting-start; the fresh turnId invalidates the old drawer's in-flight taps. */
+export function setDrawer(room, playerId) {
+  if (!ROUND_PHASES.includes(room.phase)) return { ok: false, error: 'no round in progress' };
+  const player = room.players.get(playerId);
+  if (!player) return { ok: false, error: 'player not found' };
+  if (!player.connected) return { ok: false, error: 'that player is offline' };
+  clearTimer(room);
+  if (room.round.currentSlipId) {
+    room.round.remaining.push(room.round.currentSlipId);
+    room.round.currentSlipId = null;
+  }
+  room.round.drawerId = playerId;
+  room.activeTeam = player.team; // the turn now belongs to their side
+  room.round.turnId = randomUUID();
+  room.round.turnEndsAt = null;
+  room.round.remainingMsAtPause = null;
+  room.round.paused = false;
+  room.round.pauseReason = null;
+  // ponytail: turnPointer deliberately untouched — normal rotation resumes
+  // from where it was. Reorder the whole queue only if that turns out to matter.
+  return { ok: true };
 }

@@ -1,6 +1,27 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
+import { socket, emitAck } from '../socket';
+import { ROUND_LABELS, type Phase } from '../types';
 import RulesDialog from '../components/RulesDialog';
+
+/** Shown as the name placeholder and as the tooltip on anything a missing
+ *  name blocks — the disabled buttons alone didn't say why. */
+const NEEDS_NAME = 'Please enter your name';
+
+/** "In lobby" / "Writing words" / "Round 2 · Charades" */
+function lobbyStatus(phase: Phase): string {
+  if (phase === 'LOBBY') return 'In lobby';
+  if (phase === 'WRITING') return 'Writing words';
+  const n = ['ROUND1', 'ROUND2', 'ROUND3'].indexOf(phase) + 1;
+  return `Round ${n} · ${ROUND_LABELS[phase]}`;
+}
+
+interface Lobby {
+  code: string;
+  playerCount: number;
+  hostName: string | null;
+  phase: Phase;
+}
 
 /** Supports sharing a room as a link (`/join/ABCD`) instead of just the bare
  * code — the server's catch-all route already serves the SPA for any path,
@@ -16,6 +37,7 @@ export default function Landing() {
   const [roomCode, setRoomCode] = useState(() => joinCodeFromUrl());
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [lobbies, setLobbies] = useState<Lobby[]>([]);
   const rulesRef = useRef<HTMLDialogElement>(null);
 
   // clean the URL back to "/" once we've read it — nothing else in this
@@ -25,77 +47,141 @@ export default function Landing() {
     if (window.location.pathname !== '/') window.history.replaceState(null, '', '/');
   }, []);
 
+  // ask once for the current list, then let the server push updates as rooms
+  // open and fill up
+  useEffect(() => {
+    let live = true;
+    // A broadcast can beat the initial reply (someone opens a room in the split
+    // second we're asking). The reply is a snapshot from *before* that, so once
+    // a push has landed it must not overwrite it.
+    let pushed = false;
+    emitAck<{ ok: boolean; lobbies?: Lobby[] }>('list-lobbies').then((res) => {
+      if (live && !pushed) setLobbies(res.lobbies ?? []);
+    });
+    const onLobbies = (next: Lobby[]) => {
+      pushed = true;
+      setLobbies(next);
+    };
+    socket.on('lobbies', onLobbies);
+    return () => {
+      live = false;
+      socket.off('lobbies', onLobbies);
+    };
+  }, []);
+
   function rememberName(value: string) {
     setName(value);
     localStorage.setItem('poopsmoothie-name', value);
   }
 
-  async function handleCreate() {
-    if (!name.trim()) return setError('enter your name first');
-    setBusy(true);
-    setError(null);
-    const res = await createRoom(name.trim());
-    setBusy(false);
-    if (!res.ok) setError(res.error ?? 'could not create room');
-  }
+  const code = roomCode.trim().toUpperCase();
+  const named = !!name.trim();
+  const ready = !busy && named;
 
-  async function handleJoin() {
-    if (!name.trim()) return setError('enter your name first');
-    if (roomCode.trim().length !== 4) return setError('room code is 4 letters');
+  /** Tapping a room joins straight in — the server drops you on whichever team
+   *  is short (Team Blue on a tie), so there's nothing to pick on the way in. */
+  async function go(joinCode = '') {
+    if (!named) return setError('enter your name first');
     setBusy(true);
     setError(null);
-    const res = await joinRoom(roomCode.trim().toUpperCase(), name.trim());
+    const res = joinCode ? await joinRoom(joinCode, name.trim()) : await createRoom(name.trim());
     setBusy(false);
-    if (!res.ok) setError(res.error ?? 'could not join room');
+    if (!res.ok) setError(res.error ?? (joinCode ? 'could not join room' : 'could not create room'));
   }
 
   return (
     <div className="screen screen-center">
-      <h1 className="title">💩🥤 Poopsmoothie</h1>
-      <p className="subtitle">Write nouns. Split into teams. Guess like crazy.</p>
-      <button className="link-btn" onClick={() => rulesRef.current?.showModal()}>
-        📜 How to play
-      </button>
-      <RulesDialog ref={rulesRef} />
+      <div className="landing">
+        <header className="landing-head">
+          <h1 className="title">💩🥤 Poopsmoothie</h1>
+          <p className="subtitle">Write nouns. Split into teams. Guess like crazy.</p>
+        </header>
 
-      <label className="field">
-        <span>Your name</span>
-        <input
-          value={name}
-          onChange={(e) => rememberName(e.target.value)}
-          placeholder="Dave"
-          maxLength={40}
-          autoComplete="off"
-        />
-      </label>
+        <div className="card landing-card">
+          <label className="field">
+            <span>Your name</span>
+            <input
+              value={name}
+              onChange={(e) => rememberName(e.target.value)}
+              placeholder={NEEDS_NAME}
+              maxLength={40}
+              autoComplete="off"
+            />
+          </label>
 
-      <div className="card">
-        <h2>Join a room</h2>
-        <label className="field">
-          <span>Room code</span>
-          <input
-            className="room-code-input"
-            value={roomCode}
-            onChange={(e) => setRoomCode(e.target.value.toUpperCase().slice(0, 4))}
-            placeholder="ABCD"
-            maxLength={4}
-            autoCapitalize="characters"
-            autoComplete="off"
-          />
-        </label>
-        <button className="btn btn-primary" disabled={busy} onClick={handleJoin}>
-          Join room
+          <div className="lobby-panel-head">
+            <h2>Open rooms</h2>
+            <span className="lobby-count">{lobbies.length} open</span>
+          </div>
+
+          {lobbies.length === 0 ? (
+            <p className="lobby-empty">No rooms yet — start one below.</p>
+          ) : (
+            <>
+              {/* the title sits on each <li>, not the button: browsers don't show
+                  tooltips for disabled form controls, so it'd never appear */}
+              <ul className="lobby-list">
+                {lobbies.map((lobby) => (
+                  <li key={lobby.code} title={named ? undefined : NEEDS_NAME}>
+                    <button className="lobby-row" disabled={!ready} onClick={() => go(lobby.code)}>
+                      <span className="lobby-row-top">
+                        <span className="lobby-code">{lobby.code}</span>
+                        {lobby.phase !== 'LOBBY' && <span className="lobby-live">live</span>}
+                      </span>
+                      <span className="lobby-meta">
+                        {lobby.hostName ? `${lobby.hostName}'s room · ` : ''}
+                        {lobbyStatus(lobby.phase)} · {lobby.playerCount}{' '}
+                        {lobby.playerCount === 1 ? 'player' : 'players'}
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+              <small className="field-hint">
+                Tap a room to jump in — you&rsquo;ll land on whichever team is short. Rooms marked{' '}
+                <em>live</em> are already playing and allow hot join.
+              </small>
+            </>
+          )}
+
+          <span title={named ? undefined : NEEDS_NAME}>
+            <button className="btn btn-primary" disabled={!ready} onClick={() => go()}>
+              ➕ Start a new game
+            </button>
+          </span>
+
+          {/* secondary path: everyone on this wifi sees the list above, so a
+              code is only needed for a shared /join/ link (which prefills and
+              auto-opens this) or a room that hasn't shown up yet */}
+          <details className="code-details" open={!!roomCode}>
+            <summary>Join with a room code</summary>
+            <div className="code-row">
+              <input
+                className="room-code-input"
+                value={roomCode}
+                onChange={(e) => setRoomCode(e.target.value.toUpperCase().slice(0, 4))}
+                placeholder="ABCD"
+                maxLength={4}
+                autoCapitalize="characters"
+                autoComplete="off"
+                aria-label="Room code"
+              />
+              <span title={named ? undefined : NEEDS_NAME}>
+                <button className="btn" disabled={!ready || code.length !== 4} onClick={() => go(code)}>
+                  Join
+                </button>
+              </span>
+            </div>
+          </details>
+
+          {error && <p className="error landing-error">{error}</p>}
+        </div>
+
+        <button className="link-btn landing-rules" onClick={() => rulesRef.current?.showModal()}>
+          📜 How to play
         </button>
+        <RulesDialog ref={rulesRef} />
       </div>
-
-      <div className="card">
-        <h2>Start a new game</h2>
-        <button className="btn" disabled={busy} onClick={handleCreate}>
-          Create room
-        </button>
-      </div>
-
-      {error && <p className="error">{error}</p>}
     </div>
   );
 }

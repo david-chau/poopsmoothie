@@ -15,6 +15,9 @@ interface GameContextValue {
   myPlayer: GameState['players'][number] | null;
   isHost: boolean;
   isDrawer: boolean;
+  /** one-off message to surface as a toast (e.g. the host closed the room) */
+  notice: string | null;
+  dismissNotice: () => void;
   createRoom: (name: string) => Promise<{ ok: boolean; error?: string }>;
   joinRoom: (roomCode: string, name: string) => Promise<{ ok: boolean; error?: string }>;
   leaveToLanding: () => void;
@@ -27,6 +30,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
   const [identity, setIdentity] = useState<Identity | null>(loadIdentity());
   const [mySlip, setMySlip] = useState<DrawnSlip | null>(null);
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
   // kept in a ref so the 'connect'/'state' listeners (registered once) always see the latest identity
   const identityRef = useRef(identity);
   useEffect(() => {
@@ -53,14 +57,26 @@ export function GameProvider({ children }: { children: ReactNode }) {
       setIdentity(null);
       setState(null);
     }
+    // host hit "End room for everyone" — the room is already gone server-side,
+    // so drop our stored identity too or auto-rejoin would retry a dead code.
+    function onRoomClosed(payload?: { reason?: string }) {
+      clearIdentity();
+      identityRef.current = null;
+      setIdentity(null);
+      setState(null);
+      setMySlip(null);
+      setNotice(payload?.reason ?? 'The room was closed.');
+    }
 
     socket.on('state', onState);
     socket.on('slip-revealed', onSlipRevealed);
+    socket.on('room-closed', onRoomClosed);
     wireAutoRejoin(onRejoinFailed);
 
     return () => {
       socket.off('state', onState);
       socket.off('slip-revealed', onSlipRevealed);
+      socket.off('room-closed', onRoomClosed);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -113,6 +129,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
         myPlayer,
         isHost,
         isDrawer,
+        notice,
+        dismissNotice: () => setNotice(null),
         createRoom,
         joinRoom,
         leaveToLanding,

@@ -5,7 +5,7 @@ export function makeState(overrides: Partial<GameState> = {}): GameState {
   return {
     code: 'ABCD',
     hostId: 'p1',
-    config: { wordsPerPlayer: 5, turnSeconds: 60, allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false } },
+    config: { wordsPerPlayer: 5, turnSeconds: 60, hotJoin: true, allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false } },
     phase: 'LOBBY' as Phase,
     players: [
       { id: 'p1', name: 'Alice', team: 'A', connected: true },

@@ -14,7 +14,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { io } from 'socket.io-client';
-import { createBot } from './bot.mjs';
+import { createBot } from '../server/bot.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const IMAGE = 'poopsmoothie:e2e';

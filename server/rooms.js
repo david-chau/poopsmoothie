@@ -23,7 +23,14 @@ export function newRoom() {
     hostId: null,
     // Pass/skip enabled per round by default — off for Password (round 3):
     // one-word clues don't leave much room for "come back to this one later".
-    config: { wordsPerPlayer: 5, turnSeconds: 60, allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false } },
+    // hotJoin: latecomers can drop into a game already under way. Off means
+    // the doors shut the moment the game starts (the original behaviour).
+    config: {
+      wordsPerPlayer: 5,
+      turnSeconds: 60,
+      hotJoin: true,
+      allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false },
+    },
     players: new Map(), // playerId -> { id, secret, name, team, connected, socketId }
     phase: 'LOBBY', // LOBBY -> WRITING -> ROUND1 -> ROUND2 -> ROUND3 -> SCORES
     submissions: {}, // playerId -> string[]
@@ -44,9 +51,10 @@ export function newRoom() {
       pauseReason: null,
       timeoutHandle: null,
     },
+    // both derived from pool[].scoredBy by game.recomputeScores — cached here
+    // only so the broadcast payload stays cheap
     teamScores: { A: 0, B: 0 },
-    roundScores: [], // [{A,B}] delta per completed round
-    roundStartScores: { A: 0, B: 0 },
+    roundScores: [], // [{A,B}] per completed round
   };
   rooms.set(code, room);
   return room;
@@ -83,6 +91,13 @@ export function findPlayerBySecret(room, playerId, secret) {
   const player = room.players.get(playerId);
   if (!player || player.secret !== secret) return null;
   return player;
+}
+
+/** Can a newcomer still get in? Always during the lobby; mid-game only when the
+ *  host left hot join on. Never once the game is over — there's nothing to join. */
+export function canJoin(room) {
+  if (room.phase === 'SCORES') return false;
+  return room.phase === 'LOBBY' || room.config.hotJoin !== false;
 }
 
 export function isHost(room, playerId) {

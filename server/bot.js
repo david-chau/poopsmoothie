@@ -1,5 +1,5 @@
-// Importable bot factory (see dev-bots.mjs for the CLI wrapper, bot.test.mjs
-// for the integration test). A bot joins a room, auto-submits words, and
+// Importable bot factory (see scripts/dev-bots.mjs for the CLI wrapper,
+// scripts/bot.test.mjs for the integration test). A bot joins a room, auto-submits words, and
 // auto-plays its turn (start -> guess/pass) so a game can run with fewer real
 // devices than players.
 import { io } from 'socket.io-client';
@@ -21,12 +21,15 @@ const noop = () => {};
  * @param {number} [opts.startDelayMs] delay before tapping "start turn"
  * @param {number} [opts.guessDelayMs] delay before answering each slip
  * @param {number} [opts.correctProbability] chance of "correct" vs "pass" (0..1)
+ * @param {string} [opts.botToken] one-time token from bots.js, so the server can
+ *        flag this join as a bot at the moment it lands (CLI bots don't get one)
  * @returns {{ socket: import('socket.io-client').Socket, getId: () => string|null }}
  */
 export function createBot({
   url,
   roomCode,
   name,
+  botToken,
   onLog = noop,
   startDelayMs = 500,
   guessDelayMs = 900,
@@ -40,7 +43,7 @@ export function createBot({
 
   socket.on('connect', async () => {
     if (me) return; // reconnect: keep existing identity, don't re-join
-    const res = await ack(socket, 'join-room', { roomCode, name });
+    const res = await ack(socket, 'join-room', { roomCode, name, botToken });
     if (!res.ok) return onLog(`[${name}] join failed: ${res.error}`);
     me = res.playerId;
     onLog(`[${name}] joined`);

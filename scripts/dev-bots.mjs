@@ -1,8 +1,8 @@
 // Dev-only CLI: fills a room with fake players so you can test with fewer than
-// 4 real devices. Bot behavior lives in bot.mjs (also covered by bot.test.mjs).
+// 4 real devices. Bot behavior lives in server/bot.js (also covered by bot.test.mjs).
 //
 // Usage: npm run bots -- <ROOMCODE> [count]
-import { createBot } from './bot.mjs';
+import { createBot } from '../server/bot.js';
 
 const [, , roomCodeArg, countArg] = process.argv;
 const roomCode = (roomCodeArg || '').toUpperCase();

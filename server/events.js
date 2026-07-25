@@ -1,6 +1,8 @@
 import * as rooms from './rooms.js';
 import * as game from './game.js';
 import * as persist from './persist.js';
+import * as suggestions from './suggestions.js';
+import * as bots from './bots.js';
 
 const ROUND_PHASES = ['ROUND1', 'ROUND2', 'ROUND3'];
 
@@ -18,6 +20,7 @@ function publicState(room) {
       name: p.name,
       team: p.team,
       connected: p.connected,
+      isBot: !!p.isBot,
     })),
     submittedPlayerIds: Object.keys(room.submissions),
     activeTeam: room.activeTeam,
@@ -36,6 +39,13 @@ function publicState(room) {
     serverNow: Date.now(),
     // gap #O: full pool + authors only revealed once the game is over.
     pool: room.phase === 'SCORES' ? Object.values(room.pool) : undefined,
+    // Slips that have already been guessed out loud at least once — no longer
+    // secret from anybody, so they're safe to name mid-game and are what the
+    // host's scoring table edits. Unguessed slips stay hidden, and authorId is
+    // withheld until the SCORES reveal either way.
+    guessedSlips: Object.values(room.pool)
+      .filter((s) => s.scoredBy?.length)
+      .map((s) => ({ id: s.id, text: s.text, scoredBy: s.scoredBy })),
   };
 }
 
@@ -54,9 +64,40 @@ function sendSlipToDrawer(io, room) {
   });
 }
 
+/** Open rooms, for the landing screen's lobby list. Only rooms still in LOBBY
+ *  (you can't join once play starts) and only ones with somebody actually
+ *  connected, so a room whose players all closed their tabs stops advertising
+ *  itself. Codes are deliberately public: everyone here is on the same wifi,
+ *  and picking your game off a list beats reading letters out loud. */
+function publicLobbies() {
+  return [...rooms.rooms.values()]
+    .filter((room) => rooms.canJoin(room))
+    .map((room) => ({
+      code: room.code,
+      playerCount: [...room.players.values()].filter((p) => p.connected).length,
+      hostName: room.players.get(room.hostId)?.name ?? null,
+      phase: room.phase, // so the list can say "Round 2" rather than just "open"
+    }))
+    .filter((lobby) => lobby.playerCount > 0)
+    .sort((a, b) => a.code.localeCompare(b.code));
+}
+
+/** Everyone gets this, including sockets not in any room — that's the point,
+ *  the landing screen is where it's rendered. */
+function broadcastLobbies(io) {
+  io.emit('lobbies', publicLobbies());
+}
+
 function persistAndBroadcast(io, room) {
   persist.saveRoom(room);
   broadcastState(io, room);
+  broadcastLobbies(io); // joins/leaves/starts all change what's joinable
+}
+
+/** Where bots dial back in. Loopback, not the LAN address: the bot process is
+ *  this process, so it never needs to leave the box. */
+function selfUrl() {
+  return process.env.SELF_URL || `http://127.0.0.1:${process.env.PORT || 4321}`;
 }
 
 export function registerSocketHandlers(io, socket) {
@@ -75,6 +116,9 @@ export function registerSocketHandlers(io, socket) {
     persistAndBroadcast(io, room);
   }
 
+  // initial fill for a freshly-loaded landing screen; updates arrive by broadcast
+  socket.on('list-lobbies', (_data, ack) => ack?.({ ok: true, lobbies: publicLobbies() }));
+
   socket.on('create-room', ({ name } = {}, ack) => {
     const room = rooms.newRoom();
     const player = rooms.addPlayer(room, name);
@@ -86,11 +130,14 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, roomCode: room.code, playerId: player.id, secret: player.secret });
   });
 
-  socket.on('join-room', ({ roomCode, name } = {}, ack) => {
+  socket.on('join-room', ({ roomCode, name, botToken } = {}, ack) => {
     const room = rooms.getRoom(roomCode);
     if (!room) return ack?.({ ok: false, error: 'room not found' });
-    if (room.phase !== 'LOBBY') return ack?.({ ok: false, error: 'game already started' });
+    if (!rooms.canJoin(room)) return ack?.({ ok: false, error: 'game already started' });
     const player = rooms.addPlayer(room, name);
+    // settle the bot flag here, before the roster broadcast below goes out
+    if (bots.claimBotToken(room.code, botToken)) player.isBot = true;
+    game.addLatePlayer(room, player); // mid-game joiner needs a slot in the rotation
     player.socketId = socket.id;
     socket.data.roomCode = room.code;
     socket.data.playerId = player.id;
@@ -130,6 +177,13 @@ export function registerSocketHandlers(io, socket) {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    // hotJoin isn't a game-balance setting — it's a door. Let the host shut it
+    // (or reopen it) mid-game, unlike everything below which locks at start.
+    if (config.hotJoin != null) {
+      ctx.room.config.hotJoin = !!config.hotJoin;
+      persistAndBroadcast(io, ctx.room);
+      if (Object.keys(config).length === 1) return ack?.({ ok: true });
+    }
     if (ctx.room.phase !== 'LOBBY' && ctx.room.phase !== 'WRITING') {
       return ack?.({ ok: false, error: 'config locked once play starts' }); // gap #R
     }
@@ -143,6 +197,32 @@ export function registerSocketHandlers(io, socket) {
     }
     persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
+  });
+
+  // Test/demo helper: fill the lobby with auto-playing fake players. LOBBY only,
+  // because that's the only phase join-room accepts — same door as a real guest.
+  socket.on('add-bots', ({ count } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    if (ctx.room.phase !== 'LOBBY') return ack?.({ ok: false, error: 'bots can only be added from the lobby' });
+    const n = Math.max(1, Math.min(bots.MAX_BOTS_PER_CALL, Math.trunc(Number(count)) || 1));
+    if (ctx.room.players.size + n > bots.MAX_PLAYERS) {
+      return ack?.({ ok: false, error: `room holds at most ${bots.MAX_PLAYERS} players` });
+    }
+    bots.addBots(ctx.room, n, selfUrl());
+    // no broadcast here — each bot's own join-room does it as it lands
+    ack?.({ ok: true });
+  });
+
+  socket.on('remove-bots', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const removed = bots.removeBots(ctx.room);
+    for (const botId of removed) rooms.removePlayer(ctx.room, botId);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true, removed: removed.length });
   });
 
   socket.on('start-game', (_data, ack) => {
@@ -171,6 +251,17 @@ export function registerSocketHandlers(io, socket) {
       persistAndBroadcast(io, ctx.room);
     }
     ack?.({ ok: true });
+  });
+
+  // read-only: hands back suggestions, never writes them into submissions —
+  // the player still has to look at them and hit Submit.
+  socket.on('suggest-words', ({ count, exclude } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (ctx.room.phase !== 'WRITING') return ack?.({ ok: false, error: 'not in writing phase' });
+    const n = Math.max(1, Math.min(20, Math.trunc(Number(count)) || 1));
+    const words = suggestions.suggestWords(ctx.room, n, Array.isArray(exclude) ? exclude : []);
+    ack?.({ ok: true, words });
   });
 
   socket.on('force-start-round', (_data, ack) => {
@@ -243,10 +334,71 @@ export function registerSocketHandlers(io, socket) {
   socket.on('resume-turn', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
-    const result = game.resumeTurn(ctx.room, ctx.player.id, onTimeout);
+    const result = game.resumeTurn(ctx.room, ctx.player.id, onTimeout, {
+      isHost: rooms.isHost(ctx.room, ctx.player.id),
+    });
     if (!result.ok) return ack?.(result);
     persistAndBroadcast(io, ctx.room);
     sendSlipToDrawer(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  socket.on('host-pause', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no turn in progress' });
+    const result = game.hostPause(ctx.room);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  socket.on('revert-last-guess', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const result = game.revertLastGuess(ctx.room);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true, text: result.text });
+  });
+
+  socket.on('set-drawer', ({ playerId } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const result = game.setDrawer(ctx.room, playerId);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  socket.on('set-slip-scorer', ({ slipId, round, playerId } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const result = game.setSlipScorer(ctx.room, slipId, round, playerId ?? null);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  // Nuke the room for everyone. Unlike end-game (which just jumps to SCORES and
+  // leaves the room joinable), this destroys it — so every client gets told
+  // explicitly, before the room is gone, and sends itself back to the landing.
+  socket.on('end-room', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const code = ctx.room.code;
+    bots.removeBots(ctx.room);
+    io.to(code).emit('room-closed', { reason: 'The host ended the game.' });
+    io.socketsLeave(code); // nobody left to broadcast to after this
+    rooms.destroyRoom(code);
+    bots.forgetRoom(code);
+    persist.deleteRoom(code);
+    broadcastLobbies(io); // it just stopped being joinable
     ack?.({ ok: true });
   });
 
@@ -267,11 +419,18 @@ export function registerSocketHandlers(io, socket) {
     socket.leave(ctx.room.code);
     delete socket.data.roomCode;
     delete socket.data.playerId;
+    // bots don't know to go home: once the humans are gone they'd hold the room
+    // open forever, so the last human out takes them with them.
+    if (bots.onlyBotsRemain(ctx.room)) {
+      for (const botId of bots.removeBots(ctx.room)) rooms.removePlayer(ctx.room, botId);
+    }
     // last one out: tear the room down instead of leaving an empty husk in
     // memory and on disk forever (nobody to broadcast to, either).
     if (ctx.room.players.size === 0) {
       rooms.destroyRoom(ctx.room.code);
+      bots.forgetRoom(ctx.room.code);
       persist.deleteRoom(ctx.room.code);
+      broadcastLobbies(io);
       return ack?.({ ok: true });
     }
     if (wasDrawer) game.skipDrawer(ctx.room); // they're gone for good, don't leave the turn paused forever

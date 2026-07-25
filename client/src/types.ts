@@ -6,6 +6,8 @@ export interface PlayerPublic {
   name: string;
   team: Team;
   connected: boolean;
+  /** host-spawned test player (server/bots.js), not a real device */
+  isBot?: boolean;
 }
 
 export interface Slip {
@@ -32,7 +34,13 @@ export interface RoundPublic {
 export interface GameState {
   code: string;
   hostId: string;
-  config: { wordsPerPlayer: number; turnSeconds: number; allowSkip: Record<'ROUND1' | 'ROUND2' | 'ROUND3', boolean> };
+  config: {
+    wordsPerPlayer: number;
+    turnSeconds: number;
+    /** latecomers can drop into a game already in progress */
+    hotJoin: boolean;
+    allowSkip: Record<'ROUND1' | 'ROUND2' | 'ROUND3', boolean>;
+  };
   phase: Phase;
   players: PlayerPublic[];
   submittedPlayerIds: string[];
@@ -42,6 +50,8 @@ export interface GameState {
   round: RoundPublic;
   serverNow: number;
   pool?: Slip[];
+  /** already-guessed slips (public knowledge), for the host's scoring table */
+  guessedSlips?: Pick<Slip, 'id' | 'text' | 'scoredBy'>[];
 }
 
 export const ROUND_LABELS: Record<string, string> = {

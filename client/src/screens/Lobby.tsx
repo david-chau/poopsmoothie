@@ -28,6 +28,8 @@ export default function Lobby() {
   const teamA = state.players.filter((p) => p.team === 'A');
   const teamB = state.players.filter((p) => p.team === 'B');
   const connectedCount = state.players.filter((p) => p.connected).length;
+  const missingForStart = Math.max(0, 4 - connectedCount);
+  const hasBots = state.players.some((p) => p.isBot);
 
   async function switchTeam(targetPlayerId: string, team: Team) {
     const res = await emitAck<{ ok: boolean; error?: string }>('set-team', { targetPlayerId, team });
@@ -35,7 +37,12 @@ export default function Lobby() {
   }
 
   async function updateConfig(
-    patch: Partial<{ wordsPerPlayer: number; turnSeconds: number; allowSkip: Partial<Record<SkipRound, boolean>> }>,
+    patch: Partial<{
+      wordsPerPlayer: number;
+      turnSeconds: number;
+      hotJoin: boolean;
+      allowSkip: Partial<Record<SkipRound, boolean>>;
+    }>,
   ) {
     const res = await emitAck<{ ok: boolean; error?: string }>('set-config', patch);
     setError(res.ok ? null : (res.error ?? 'could not update settings'));
@@ -67,6 +74,16 @@ export default function Lobby() {
     setError(res.ok ? null : (res.error ?? 'could not start'));
   }
 
+  async function addBots(count: number) {
+    const res = await emitAck<{ ok: boolean; error?: string }>('add-bots', { count });
+    setError(res.ok ? null : (res.error ?? 'could not add bots'));
+  }
+
+  async function removeBots() {
+    const res = await emitAck<{ ok: boolean; error?: string }>('remove-bots');
+    setError(res.ok ? null : (res.error ?? 'could not remove bots'));
+  }
+
   async function copyInviteLink() {
     // a link is easier to share/tap than reading out a 4-letter code
     const url = `${window.location.origin}/join/${state.code}`;
@@ -86,6 +103,7 @@ export default function Lobby() {
             <li key={p.id} className={p.connected ? '' : 'disconnected'}>
               <span className="dot" />
               <span className={TEAM_CLASS[team]}>{p.name}</span>
+              {p.isBot && <span className="badge">bot</span>}
               {p.id === state.hostId && <span className="badge">host</span>}
               {(p.id === identity.playerId || isHost) && (
                 <button className="link-btn" onClick={() => switchTeam(p.id, team === 'A' ? 'B' : 'A')}>
@@ -153,6 +171,17 @@ export default function Lobby() {
               onKeyDown={blurOnEnter}
             />
           </label>
+          <label className="field">
+            <span>Hot join</span>
+            <label className="skip-toggle">
+              <input
+                type="checkbox"
+                checked={state.config.hotJoin}
+                onChange={() => updateConfig({ hotJoin: !state.config.hotJoin })}
+              />
+              Latecomers can join after the game starts
+            </label>
+          </label>
           <div className="field">
             <span>Allow pass</span>
             <div className="skip-toggle-group">
@@ -164,6 +193,23 @@ export default function Lobby() {
               ))}
             </div>
           </div>
+          <div className="field">
+            <span>Test players</span>
+            <div className="bot-buttons">
+              <button className="btn" onClick={() => addBots(1)}>
+                🤖 +1
+              </button>
+              <button className="btn" onClick={() => addBots(missingForStart)} disabled={missingForStart === 0}>
+                🤖 Fill to 4
+              </button>
+              <button className="btn" onClick={removeBots} disabled={!hasBots}>
+                Remove bots
+              </button>
+            </div>
+          </div>
+          <p className="subtitle bot-hint">
+            Bots write their own words and play their own turns — for demo and test runs.
+          </p>
           <button className="btn btn-primary" onClick={startGame} disabled={connectedCount < 4}>
             Start game {connectedCount < 4 && `(need ${4 - connectedCount} more)`}
           </button>

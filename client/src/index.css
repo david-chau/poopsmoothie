@@ -214,14 +214,36 @@ input:focus,
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
-.word-input {
-  margin-bottom: 0.5rem;
+/* row spacing comes from .screen's gap now that each input sits in a
+   .word-row alongside its dice button */
+.word-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.word-row > .word-input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* square-ish, sized to the input it sits next to. Selector is scoped rather
+   than a bare `.dice-btn` so it outranks `.btn { width: 100% }` below, which
+   would otherwise win on source order and let the button eat the whole row. */
+.word-row > .dice-btn {
+  width: auto;
+  flex: 0 0 auto;
+  padding: 0 0.9rem;
+  font-size: 1.1rem;
 }
 
 .room-code-input {
   text-align: center;
   font-size: 1.5rem;
   letter-spacing: 0.3em;
+  /* letter-spacing also applies *after* the last character, which drags
+     centered text visibly left — pull it back by the same amount */
+  text-indent: 0.3em;
   text-transform: uppercase;
 }
 
@@ -935,4 +957,423 @@ input:focus,
 
 .rules-dialog form {
   margin-top: 1rem;
+}
+
+/* admin drawer — bottom sheet. `inset: auto 0 0` pins it to the bottom edge
+   (a plain `margin:auto auto 0` leaves the UA's default top inset in play, so
+   a tall sheet floats mid-screen and gets clipped). Fixed header + scrolling
+   body means the title and Close never scroll away. */
+.admin-drawer {
+  position: fixed;
+  inset: auto 0 0;
+  margin: 0 auto;
+  text-align: left;
+  color: var(--text);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 16px 16px 0 0;
+  padding: 0;
+  width: min(560px, 100%);
+  max-width: 100%;
+  max-height: min(82vh, 640px);
+  overflow: hidden; /* the body scrolls, not the sheet */
+}
+
+/* Scoped to [open] on purpose: a bare `display: flex` on .admin-drawer beats
+   the UA's `dialog:not([open]) { display: none }`, which leaves the sheet
+   permanently on screen and makes Close a no-op. */
+.admin-drawer[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-drawer::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.admin-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  flex: 0 0 auto;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.admin-drawer-head h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.admin-drawer-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain; /* don't scroll the page behind the sheet */
+  padding: 0.25rem 1rem max(1rem, env(safe-area-inset-bottom));
+}
+
+.admin-drawer h3 {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  margin: 0.9rem 0 0.4rem;
+}
+
+/* action row: pairs sit side by side instead of stacking full-width, which is
+   what made this sheet twice as tall as it needed to be */
+.admin-grid {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.admin-grid > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.admin-grid .btn:not(:only-child) {
+  flex: 0 0 auto;
+  width: auto;
+  padding-left: 0.9rem;
+  padding-right: 0.9rem;
+}
+
+.admin-wide {
+  margin-top: 0.4rem;
+}
+
+/* everything in the sheet is secondary UI — shorter than the thumb-sized
+   .btn used for primary in-game actions */
+.admin-drawer .btn {
+  min-height: 38px;
+  padding: 0.45rem 0.75rem;
+  font-size: 0.9rem;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.admin-hint {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin: 0.35rem 0 0;
+}
+
+.btn-danger {
+  background: var(--danger);
+  color: #fff;
+  border-color: var(--danger);
+}
+
+/* who-guessed-what table: 4 columns don't fit a phone, so it scrolls
+   sideways inside its own box rather than widening the sheet */
+.admin-table-scroll {
+  overflow-x: auto;
+  margin-top: 0.4rem;
+}
+
+.admin-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.85rem;
+}
+
+.admin-table th,
+.admin-table td {
+  padding: 0.25rem 0.35rem;
+  text-align: left;
+  vertical-align: middle;
+}
+
+.admin-table thead th {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.admin-table tbody th {
+  font-weight: 600;
+  white-space: nowrap;
+  padding-right: 0.6rem;
+}
+
+.admin-table tbody tr + tr {
+  border-top: 1px solid var(--border);
+}
+
+.admin-table .admin-select {
+  min-width: 6.5rem;
+  min-height: 32px;
+  padding: 0.25rem 0.4rem;
+  font-size: 0.8rem;
+}
+
+.admin-select {
+  width: 100%;
+  padding: 0.45rem 0.6rem;
+  min-height: 38px;
+  font-size: 0.9rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.admin-note {
+  color: var(--success);
+  font-weight: 600;
+  font-size: 0.85rem;
+  margin-top: 0.6rem;
+}
+
+/* toast — pinned top-center, above the sheet's backdrop */
+.toast {
+  position: fixed;
+  top: max(0.75rem, env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 10;
+  max-width: min(460px, calc(100vw - 1.5rem));
+  padding: 0.7rem 1rem;
+  border-radius: 12px;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-align: center;
+  cursor: pointer;
+}
+
+/* "You're <name>" identity chrome above every in-room screen */
+.my-name-badge {
+  align-self: flex-end;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  margin-bottom: 0.5rem;
+}
+
+/* lobby bot controls */
+.bot-buttons {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.bot-buttons .btn {
+  flex: 1;
+  padding: 0.6rem 0.5rem;
+  font-size: 0.9rem;
+}
+
+.bot-hint {
+  margin: -0.25rem 0 0.75rem;
+  font-size: 0.8rem;
+  text-align: left;
+}
+
+/* landing — one fixed-width column so the name field, code field and button
+   all share the same edges (they used to size themselves independently inside
+   a centered flex, which is what read as ragged) */
+.landing {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1rem;
+}
+
+.landing-head {
+  text-align: center;
+}
+
+.landing-head .title {
+  margin-bottom: 0.35rem;
+}
+
+.landing-head .subtitle {
+  margin: 0;
+}
+
+.landing-card {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem;
+  border-radius: 16px;
+  box-shadow: var(--shadow-md);
+  text-align: left;
+}
+
+/* the shared .field margin would fight the card's gap */
+.landing-card .field {
+  margin-bottom: 0;
+}
+
+.field-hint {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+}
+
+.landing-error {
+  margin: 0;
+  text-align: center;
+}
+
+.landing-rules {
+  align-self: center;
+  margin: 0;
+}
+
+/* landing panels: stacked on a phone, side by side once there's room.
+   The shell is normally 640px for one-handed play — the landing is the one
+   screen with two columns, so it gets to be wider. */
+.lobby-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.lobby-panel-head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.lobby-count {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.2rem 0.6rem;
+}
+
+.lobby-empty {
+  margin: 0;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  padding: 1rem 0;
+}
+
+.lobby-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.lobby-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.15rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    border-color 0.15s,
+    transform 0.1s;
+}
+
+.lobby-row:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.lobby-row:active:not(:disabled) {
+  transform: scale(0.99);
+}
+
+.lobby-row:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.lobby-code {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+}
+
+.lobby-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+/* room-code entry is the secondary path now that the list is primary */
+.code-details > summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--accent);
+  list-style: none;
+}
+
+.code-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.code-details > summary::before {
+  content: '▸ ';
+}
+
+.code-details[open] > summary::before {
+  content: '▾ ';
+}
+
+.code-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.code-row .room-code-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.code-row .btn {
+  width: auto;
+  flex: 0 0 auto;
+  padding-left: 1.1rem;
+  padding-right: 1.1rem;
+}
+
+.lobby-row-top {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* "already playing" marker on a hot-joinable room */
+.lobby-live {
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-text);
+  background: var(--accent);
+  border-radius: 999px;
+  padding: 0.1rem 0.45rem;
+}
+
+/* tooltip wrappers around disabled buttons — must not become flex items that
+   collapse the button they hold (browsers won't show a title on a disabled
+   control, so the span carries it instead) */
+.landing-card > span,
+.code-row > span {
+  display: contents;
 }

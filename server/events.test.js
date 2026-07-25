@@ -81,12 +81,12 @@ test('join-room: works in lobby, rejected after the game has started', async () 
   const joiners = await Promise.all([connect(), connect(), connect()]);
   for (const j of joiners) assert.equal((await ack(j, 'join-room', { roomCode: create.roomCode, name: 'x' })).ok, true);
 
-  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'set-config', { wordsPerPlayer: 1, hotJoin: false }); // doors shut at start
   await ack(host, 'start-game');
 
   const late = await connect();
   const res = await ack(late, 'join-room', { roomCode: create.roomCode, name: 'Late' });
-  assert.equal(res.ok, false); // WRITING phase, no new joiners
+  assert.equal(res.ok, false); // WRITING phase + hot join off, no new joiners
 });
 
 test('set-config: host-only, clamps values, merges allowSkip without clobbering', async () => {
@@ -205,4 +205,126 @@ test('rejoin: valid creds restore the player, bad creds fail', async () => {
   assert.equal((await ack(back, 'rejoin', { roomCode: create.roomCode, playerId: create.playerId, secret: 'wrong' })).ok, false);
   const ok = await ack(back, 'rejoin', { roomCode: create.roomCode, playerId: create.playerId, secret: create.secret });
   assert.equal(ok.ok, true);
+});
+
+test('end-room is host-only, tells everyone, and destroys the room', async () => {
+  const host = await connect();
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  const guest = await connect();
+  await ack(guest, 'join-room', { roomCode: create.roomCode, name: 'Guest' });
+
+  assert.equal((await ack(guest, 'end-room')).ok, false); // guest can't
+
+  // the guest must hear about it, not just the host who pressed the button
+  const closed = new Promise((r) => guest.once('room-closed', r));
+  assert.equal((await ack(host, 'end-room')).ok, true);
+  const payload = await closed;
+  assert.match(payload.reason, /host ended/i);
+
+  // room is really gone — a fresh socket can't join the code any more
+  const stray = await connect();
+  const rejoin = await ack(stray, 'join-room', { roomCode: create.roomCode, name: 'Late' });
+  assert.equal(rejoin.ok, false);
+  assert.match(rejoin.error, /not found/);
+});
+
+test('guessedSlips reveals a word only once it has actually been guessed', async () => {
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  const byPlayerId = new Map([[create.playerId, host]]);
+  for (const name of ['B', 'C', 'D']) {
+    const c = await connect();
+    const res = await ack(c, 'join-room', { roomCode: create.roomCode, name });
+    byPlayerId.set(res.playerId, c);
+  }
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'start-game');
+  for (const [i, c] of [...byPlayerId.values()].entries()) await ack(c, 'submit-words', { words: [`word-${i}`] });
+
+  assert.equal(state.phase, 'ROUND1');
+  assert.equal(state.guessedSlips.length, 0); // nothing guessed => nothing revealed
+  assert.equal(state.pool, undefined); // full pool still withheld mid-game
+
+  const drawer = byPlayerId.get(state.round.drawerId);
+  const revealed = new Promise((r) => drawer.once('slip-revealed', r));
+  await ack(drawer, 'start-turn');
+  const { slip, turnId } = await revealed;
+  assert.equal(state.guessedSlips.length, 0); // in the drawer's hand: still secret
+
+  await ack(drawer, 'correct-guess', { slipId: slip.id, turnId });
+  assert.deepEqual(
+    state.guessedSlips.map((s) => s.text),
+    [slip.text], // and only this one, not the three still in the bag
+  );
+  assert.equal(state.guessedSlips[0].scoredBy.length, 1);
+  assert.equal(state.guessedSlips[0].authorId, undefined); // author still hidden until SCORES
+});
+
+test('lobbies list advertises open rooms and drops them once play starts', async () => {
+  const host = await connect();
+  let lobbies = [];
+  host.on('lobbies', (l) => (lobbies = l));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+
+  const mine = () => lobbies.find((l) => l.code === create.roomCode);
+  assert.equal(mine().playerCount, 1);
+  assert.equal(mine().hostName, 'Host');
+
+  // a watcher who never joined still sees the list — that's the landing screen
+  const watcher = await connect();
+  const initial = await ack(watcher, 'list-lobbies');
+  assert.ok(initial.lobbies.some((l) => l.code === create.roomCode));
+
+  const others = [];
+  for (const name of ['B', 'C', 'D']) {
+    const c = await connect();
+    await ack(c, 'join-room', { roomCode: create.roomCode, name });
+    others.push(c);
+  }
+  assert.equal(mine().playerCount, 4); // count tracks joins
+
+  await ack(host, 'set-config', { hotJoin: false });
+  await ack(host, 'start-game');
+  assert.equal(mine(), undefined); // no longer joinable, so no longer advertised
+});
+
+test('hot join lets a latecomer into a running game; off shuts the door', async () => {
+  const { socks, roomCode, getState } = await fullRoomToRound1();
+  assert.equal(getState().config.hotJoin, true); // on by default
+  assert.equal(getState().phase, 'ROUND1');
+
+  const late = await connect();
+  const joined = await ack(late, 'join-room', { roomCode, name: 'Late' });
+  assert.equal(joined.ok, true);
+  await wait(80);
+  assert.equal(getState().players.length, 5);
+
+  // host can shut the door mid-game (this setting isn't locked like the rest)
+  assert.equal((await ack(socks[0], 'set-config', { hotJoin: false })).ok, true);
+  await wait(80);
+  assert.equal(getState().config.hotJoin, false);
+
+  const tooLate = await connect();
+  const refused = await ack(tooLate, 'join-room', { roomCode, name: 'TooLate' });
+  assert.equal(refused.ok, false);
+  assert.match(refused.error, /already started/);
+});
+
+test('lobbies list keeps hot-join games but hides closed ones', async () => {
+  const { socks, roomCode } = await fullRoomToRound1();
+  let lobbies = [];
+  const watcher = await connect();
+  watcher.on('lobbies', (l) => (lobbies = l));
+  const initial = await ack(watcher, 'list-lobbies');
+  const mine = initial.lobbies.find((l) => l.code === roomCode);
+  assert.equal(mine.phase, 'ROUND1'); // still advertised, and says what it's doing
+
+  await ack(socks[0], 'set-config', { hotJoin: false });
+  await wait(80);
+  assert.equal(
+    lobbies.find((l) => l.code === roomCode),
+    undefined,
+  );
 });
