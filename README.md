@@ -212,26 +212,42 @@ machine or most NAS/mini-PC hardware.
 
 ### Option B — pull a prebuilt image (recommended for an always-on host)
 
-Build multi-arch (amd64 + arm64) on your dev machine and push to GHCR, so the
-host machine just pulls — no source, no build RAM needed there:
+The host machine just pulls — no source checkout, no build RAM needed there.
+`docker-compose.prod.yml` uses `image:` instead of `build:` and already points
+at the published image, so it's the same command as the Quick start:
+
+```sh
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml pull   # grab a newer :latest later
+```
+
+| | |
+|---|---|
+| Image | `ghcr.io/david-chau/poopsmoothie:latest` |
+| Platforms | `linux/amd64`, `linux/arm64` |
+| All versions | [ghcr.io package versions](https://github.com/users/david-chau/packages/container/poopsmoothie/versions) |
+
+Every publish also pushes a `YYYYMMDD-HHMM` tag. Pin one via `PS_IMAGE` to roll
+back, or to point at a different account entirely:
+
+```sh
+PS_IMAGE=ghcr.io/david-chau/poopsmoothie:20260725-1210 \
+  docker compose -f docker-compose.prod.yml up -d
+```
+
+**Publishing your own build** (only needed if you've changed the code):
 
 ```sh
 # once: auth (classic token with write:packages)
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-gh-user> --password-stdin
-# publish (builds both arches, pushes :latest + a timestamp tag)
+# builds both arches, pushes :latest + a timestamp tag
 GHCR_USER=<your-gh-user> ./scripts/publish.sh
 ```
 
-Then on that host: same `docker compose -f docker-compose.prod.yml up -d` as
-the Quick start above (`pull` instead of `up -d` grabs a newer `:latest`).
-Only set `PS_IMAGE` for a different account or a pinned tag:
+`GHCR_USER` picks the account; the optional first argument is the version tag.
+Runs from any directory.
 
-```sh
-PS_IMAGE=ghcr.io/<your-gh-user>/poopsmoothie:20260725-1030 \
-  docker compose -f docker-compose.prod.yml up -d
-```
-
-To pull without `docker login`, make the GHCR package **public** (GitHub →
+To pull without `docker login`, the GHCR package must be **public** (GitHub →
 your profile → Packages → poopsmoothie → Package settings → visibility).
 
 Room state persists to `./data/rooms/*.json` on the host — survives a
@@ -244,12 +260,76 @@ environment-specific gaps (LAN discovery, port conflicts, etc).
 
 ## Architecture
 
+One container, one port, one origin — the same express server hands out the
+built React app *and* speaks socket.io, which is why phones need no CORS setup
+and no second URL.
+
+```
+              phones / laptops on the same wifi
+                            │
+                            │  http://<host-ip>:4321
+                            ▼
+┌──────────────────── container :4321 ────────────────────┐
+│                                                         │
+│  index.js  ─┬─ GET /*      ──▶  client/dist  (SPA)      │
+│             └─ /socket.io  ──▶  socket.io               │
+│                                    │                    │
+│                                    ▼                    │
+│                               events.js                 │
+│              identity read from socket.data,            │
+│              never trusted from the payload             │
+│                    │                                    │
+│         ┌──────────┼───────────────┬─────────────┐      │
+│         ▼          ▼               ▼             ▼      │
+│     rooms.js    game.js     suggestions.js    bots.js   │
+│     roster,     phases,     🎲 word pool         │      │
+│     codes,      turns,                           │      │
+│     teams,      scoring,                    spawns      │
+│     host        timers                           │      │
+│                                                  ▼      │
+│                                              bot.js     │
+│                                        (socket.io       │
+│                                         client that     │
+│                                         loops back in   │
+│                                         as an ordinary  │
+│                                         player) ──┐     │
+│                    ┌──────────────────────────────┘     │
+│                    ▼                                    │
+│           persistAndBroadcast()                         │
+│             ├─ io.to(code)  'state'    counts, no text  │
+│             ├─ io.emit      'lobbies'  open rooms, all  │
+│             └─ persist.js  ──▶  /data/rooms/<CODE>.json │
+│                                          │              │
+│           sendSlipToDrawer()             │              │
+│             └─ io.to(drawerSocket)       │              │
+│                'slip-revealed' — the     │              │
+│                only place slip text      │              │
+│                leaves the box            │              │
+│                                          │              │
+└──────────────────────────────────────────┼──────────────┘
+                                           │
+                bind mount  ./data:/data   │
+             (docker-compose.yml volumes:) │
+                                           ▼
+              ┌──────────────────────────────────────────┐
+              │  host disk   ./data/rooms/<CODE>.json    │
+              │  survives container restart, redeploy    │
+              │  and image update — this is why a crash  │
+              │  mid-game resumes instead of vanishing   │
+              └──────────────────────────────────────────┘
+```
+
+Every state-changing handler ends the same way: mutate in memory → save to disk
+→ broadcast. Nothing is written straight to a socket without going through the
+sanitizing `publicState()` first.
+
 ```
 server/
-  index.js       express + socket.io bootstrap, serves client/dist, boot recovery
+  index.js       express + socket.io bootstrap, serves SPA, boot recovery
   rooms.js       room/player CRUD, 4-char codes, team balance, host transfer
-  game.js        round/turn state machine — pool, scoring, timers, pass/skip,
-                 host patch controls (revert, set-drawer, adjust-score)
+  game.js        round/turn state machine — pool, timers, pass/skip, host
+                 patch controls (revert, set-drawer, set-slip-scorer); scores
+                 are derived from pool[].scoredBy, never accumulated
   persist.js     atomic (tmp+rename) JSON writes, load-all-on-boot
   events.js      socket event wiring, auth, sanitized public state broadcast
   suggestions.js word/phrase pool for the 🎲 buttons, deduped against the room
