@@ -308,8 +308,8 @@ and no second URL.
 │                                          │              │
 └──────────────────────────────────────────┼──────────────┘
                                            │
-                bind mount  ./data:/data   │
-             (docker-compose.yml volumes:) │
+          bind mount, from compose:        │
+                 ./data:/data              │
                                            ▼
               ┌──────────────────────────────────────────┐
               │  host disk   ./data/rooms/<CODE>.json    │
