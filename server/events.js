@@ -100,7 +100,42 @@ function selfUrl() {
   return process.env.SELF_URL || `http://127.0.0.1:${process.env.PORT || 4321}`;
 }
 
+/** Clamp to a range, keeping the old value for anything non-numeric. Without
+ *  the NaN check, `{}` or "abc" clamped to NaN and wrote NaN into the config —
+ *  wordsPerPlayer:NaN makes submit-words reject every submission, so the room
+ *  can never start and there's no UI to fix it. */
+function clampInt(value, min, max, fallback) {
+  const n = Math.trunc(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 export function registerSocketHandlers(io, socket) {
+  /**
+   * Every handler is registered through here rather than socket.on directly.
+   * A client controls both the payload *shape* and whether it sends one at all,
+   * and socket.io does not sanitise either:
+   *   - `emit('join-room', null)` defeats a `= {}` default (it only fires for
+   *     `undefined`), so destructuring throws;
+   *   - a throw inside a socket handler surfaces as an uncaughtException, which
+   *     with no process-level handler kills the server for *everyone*.
+   * So: payload coerced to an object, callback located wherever it landed, and
+   * anything that still throws becomes an error ack instead of a dead process.
+   */
+  function on(event, handler) {
+    socket.on(event, (payload, maybeAck) => {
+      // `emit(event, cb)` with no payload puts the callback in the first slot
+      const ack = typeof maybeAck === 'function' ? maybeAck : typeof payload === 'function' ? payload : undefined;
+      const data = payload && typeof payload === 'object' ? payload : {};
+      try {
+        handler(data, ack);
+      } catch (err) {
+        console.error(`socket handler '${event}' threw:`, err);
+        ack?.({ ok: false, error: 'server error' });
+      }
+    });
+  }
+
   // socket.data.{roomCode, playerId} set once on join/rejoin; every later
   // event trusts only these server-held values, never client-supplied identity.
   function context() {
@@ -117,9 +152,9 @@ export function registerSocketHandlers(io, socket) {
   }
 
   // initial fill for a freshly-loaded landing screen; updates arrive by broadcast
-  socket.on('list-lobbies', (_data, ack) => ack?.({ ok: true, lobbies: publicLobbies() }));
+  on('list-lobbies', (_data, ack) => ack?.({ ok: true, lobbies: publicLobbies() }));
 
-  socket.on('create-room', ({ name } = {}, ack) => {
+  on('create-room', ({ name } = {}, ack) => {
     const room = rooms.newRoom();
     const player = rooms.addPlayer(room, name);
     player.socketId = socket.id;
@@ -130,7 +165,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, roomCode: room.code, playerId: player.id, secret: player.secret });
   });
 
-  socket.on('join-room', ({ roomCode, name, botToken } = {}, ack) => {
+  on('join-room', ({ roomCode, name, botToken } = {}, ack) => {
     const room = rooms.getRoom(roomCode);
     if (!room) return ack?.({ ok: false, error: 'room not found' });
     if (!rooms.canJoin(room)) return ack?.({ ok: false, error: 'game already started' });
@@ -146,7 +181,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, roomCode: room.code, playerId: player.id, secret: player.secret });
   });
 
-  socket.on('rejoin', ({ roomCode, playerId, secret } = {}, ack) => {
+  on('rejoin', ({ roomCode, playerId, secret } = {}, ack) => {
     const room = rooms.getRoom(roomCode);
     const player = room && rooms.findPlayerBySecret(room, playerId, secret);
     if (!room || !player) return ack?.({ ok: false, error: 'rejoin-failed' }); // gap #7
@@ -165,7 +200,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, roomCode: room.code, playerId: player.id });
   });
 
-  socket.on('set-team', ({ targetPlayerId, team } = {}, ack) => {
+  on('set-team', ({ targetPlayerId, team } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = rooms.setTeam(ctx.room, ctx.player.id, targetPlayerId, team);
@@ -173,7 +208,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.(result);
   });
 
-  socket.on('set-config', (config = {}, ack) => {
+  on('set-config', (config = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -188,8 +223,8 @@ export function registerSocketHandlers(io, socket) {
       return ack?.({ ok: false, error: 'config locked once play starts' }); // gap #R
     }
     // `!= null` not truthiness — 0 is a valid (if nonsensical) input and should still clamp, not be ignored
-    if (config.wordsPerPlayer != null) ctx.room.config.wordsPerPlayer = Math.max(1, Math.min(20, +config.wordsPerPlayer));
-    if (config.turnSeconds != null) ctx.room.config.turnSeconds = Math.max(10, Math.min(300, +config.turnSeconds));
+    if (config.wordsPerPlayer != null) ctx.room.config.wordsPerPlayer = clampInt(config.wordsPerPlayer, 1, 20, ctx.room.config.wordsPerPlayer);
+    if (config.turnSeconds != null) ctx.room.config.turnSeconds = clampInt(config.turnSeconds, 10, 300, ctx.room.config.turnSeconds);
     if (config.allowSkip && typeof config.allowSkip === 'object') {
       for (const phase of ROUND_PHASES) {
         if (config.allowSkip[phase] != null) ctx.room.config.allowSkip[phase] = !!config.allowSkip[phase];
@@ -201,7 +236,7 @@ export function registerSocketHandlers(io, socket) {
 
   // Test/demo helper: fill the lobby with auto-playing fake players. LOBBY only,
   // because that's the only phase join-room accepts — same door as a real guest.
-  socket.on('add-bots', ({ count } = {}, ack) => {
+  on('add-bots', ({ count } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -215,7 +250,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('remove-bots', (_data, ack) => {
+  on('remove-bots', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -225,7 +260,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, removed: removed.length });
   });
 
-  socket.on('start-game', (_data, ack) => {
+  on('start-game', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -236,7 +271,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('submit-words', ({ words } = {}, ack) => {
+  on('submit-words', ({ words } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (ctx.room.phase !== 'WRITING') return ack?.({ ok: false, error: 'not in writing phase' });
@@ -255,7 +290,7 @@ export function registerSocketHandlers(io, socket) {
 
   // read-only: hands back suggestions, never writes them into submissions —
   // the player still has to look at them and hit Submit.
-  socket.on('suggest-words', ({ count, exclude } = {}, ack) => {
+  on('suggest-words', ({ count, exclude } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (ctx.room.phase !== 'WRITING') return ack?.({ ok: false, error: 'not in writing phase' });
@@ -264,7 +299,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, words });
   });
 
-  socket.on('force-start-round', (_data, ack) => {
+  on('force-start-round', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -278,7 +313,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('start-turn', (_data, ack) => {
+  on('start-turn', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = game.startTurn(ctx.room, ctx.player.id, onTimeout);
@@ -288,7 +323,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('correct-guess', ({ slipId, turnId } = {}, ack) => {
+  on('correct-guess', ({ slipId, turnId } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = game.correctGuess(ctx.room, ctx.player.id, slipId, turnId);
@@ -299,7 +334,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('pass-turn', ({ slipId, turnId } = {}, ack) => {
+  on('pass-turn', ({ slipId, turnId } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = game.passTurn(ctx.room, ctx.player.id, slipId, turnId);
@@ -310,7 +345,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('skip-drawer', (_data, ack) => {
+  on('skip-drawer', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     // gap #5/#V: host role always transfers to a connected player on disconnect
@@ -321,7 +356,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('force-pass-team', (_data, ack) => {
+  on('force-pass-team', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -331,7 +366,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('resume-turn', (_data, ack) => {
+  on('resume-turn', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = game.resumeTurn(ctx.room, ctx.player.id, onTimeout, {
@@ -343,7 +378,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('host-pause', (_data, ack) => {
+  on('host-pause', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -354,7 +389,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('revert-last-guess', (_data, ack) => {
+  on('revert-last-guess', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -364,7 +399,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, text: result.text });
   });
 
-  socket.on('set-drawer', ({ playerId } = {}, ack) => {
+  on('set-drawer', ({ playerId } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -374,7 +409,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('set-slip-scorer', ({ slipId, round, playerId } = {}, ack) => {
+  on('set-slip-scorer', ({ slipId, round, playerId } = {}, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -387,7 +422,7 @@ export function registerSocketHandlers(io, socket) {
   // Nuke the room for everyone. Unlike end-game (which just jumps to SCORES and
   // leaves the room joinable), this destroys it — so every client gets told
   // explicitly, before the room is gone, and sends itself back to the landing.
-  socket.on('end-room', (_data, ack) => {
+  on('end-room', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -402,7 +437,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('end-game', (_data, ack) => {
+  on('end-game', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
@@ -411,7 +446,7 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
-  socket.on('leave-room', (_data, ack) => {
+  on('leave-room', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: true });
     const wasDrawer = ROUND_PHASES.includes(ctx.room.phase) && ctx.room.round.drawerId === ctx.player.id;

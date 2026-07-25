@@ -328,3 +328,59 @@ test('lobbies list keeps hot-join games but hides closed ones', async () => {
     undefined,
   );
 });
+
+// Regression: a hostile or buggy client controls the payload shape. Any throw
+// inside a socket handler becomes an uncaughtException, and with no
+// process-level handler that kills the server for everyone in every room.
+test('malformed payloads are rejected, never fatal', async () => {
+  const crashes = [];
+  const onCrash = (e) => crashes.push(e.message);
+  process.on('uncaughtException', onCrash);
+
+  const c = await connect();
+  const hostile = [
+    ['join-room', { roomCode: {}, name: 'x' }], // no .toUpperCase on an object
+    ['join-room', { roomCode: [], name: 'x' }],
+    ['join-room', { roomCode: 42, name: 'x' }],
+    ['rejoin', { roomCode: {}, playerId: 'a', secret: 'b' }],
+    ['create-room', { name: {} }], // no .slice on an object
+    ['create-room', null], // `= {}` defaults only fire for undefined
+    ['join-room', null],
+    ['join-room', 'not-an-object'],
+    ['set-config', [1, 2, 3]],
+  ];
+  for (const [event, payload] of hostile) {
+    const res = await ack(c, event, payload);
+    assert.ok(res && typeof res === 'object', `${event} must still answer its ack`);
+  }
+
+  await wait(50);
+  process.off('uncaughtException', onCrash);
+  assert.deepEqual(crashes, [], 'no handler may throw out of the socket layer');
+});
+
+test('a garbage config value is ignored, not written as NaN', async () => {
+  const c = await connect();
+  const getState = latestStateOf(c);
+  await ack(c, 'create-room', { name: 'H' });
+  await wait(50);
+  const before = getState().config;
+
+  await ack(c, 'set-config', { wordsPerPlayer: {}, turnSeconds: 'abc' });
+  await wait(50);
+  // NaN here would make submit-words reject every submission, permanently
+  assert.equal(getState().config.wordsPerPlayer, before.wordsPerPlayer);
+  assert.equal(getState().config.turnSeconds, before.turnSeconds);
+
+  await ack(c, 'set-config', { wordsPerPlayer: 999 }); // real numbers still clamp
+  await wait(50);
+  assert.equal(getState().config.wordsPerPlayer, 20);
+});
+
+test('a blank or whitespace-only name falls back instead of rendering empty', async () => {
+  const c = await connect();
+  const getState = latestStateOf(c);
+  await ack(c, 'create-room', { name: '   ' });
+  await wait(50);
+  assert.equal(getState().players[0].name, 'Player');
+});

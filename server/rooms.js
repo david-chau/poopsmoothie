@@ -61,7 +61,9 @@ export function newRoom() {
 }
 
 export function getRoom(code) {
-  return rooms.get((code || '').toUpperCase());
+  // String() not `code || ''` — a client can send any JSON type here, and an
+  // object/array/number has no .toUpperCase to call
+  return rooms.get(String(code ?? '').toUpperCase());
 }
 
 /** Evict a room from memory (disk removal is persist.deleteRoom's job). */
@@ -77,7 +79,9 @@ export function addPlayer(room, name) {
   const player = {
     id,
     secret,
-    name: (name || 'Player').slice(0, 40),
+    // coerce before slicing: `{}` has no .slice, and an array's .slice would
+    // quietly produce an array where a string is expected
+    name: (String(name ?? '').trim() || 'Player').slice(0, 40),
     team: countA <= countB ? 'A' : 'B',
     connected: true,
     socketId: null,
