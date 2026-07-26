@@ -57,8 +57,9 @@ Find the host's LAN IP to share — macOS: `ipconfig getifaddr en0`; Linux:
 4. Need bodies? Host-only in the lobby: **🤖 Fill to 4** adds bots that write
    their own words and play their own turns. Good for a demo or for testing
    with two real people.
-5. Host taps **Start game** at 4+ players. Everyone writes their words — the
-   🎲 buttons fill boxes for anyone who's stuck.
+5. Host taps **Start game** at 4+ players. A sheet of paper gets cut into slips,
+   then everyone writes their words — the 🎲 buttons fill boxes for anyone
+   who's stuck.
 6. Game auto-advances to Round 1 once everyone's submitted.
 
 When you're done:
@@ -118,6 +119,10 @@ Beyond the Quick start walkthrough above, good to know while hosting:
     already-guessed slip. Team scores are derived from it, so there's no way
     to nudge a score away from what actually happened
   - **Hand this turn to someone else** when the wrong person went
+- **The host seat never goes to a bot.** Bots have no UI, so handing one the
+  room leaves the admin controls with nobody — which used to happen on every
+  refresh in a solo-plus-bots game. If no human is connected the seat simply
+  waits for the absent host rather than moving.
 - **End room for everyone** (host-only): in the lobby settings, and under
   **⚙️ Admin controls → Danger zone** once the game is running. *Leave room*
   only removes you and leaves everyone else in a lobby you've abandoned.
@@ -125,13 +130,21 @@ Beyond the Quick start walkthrough above, good to know while hosting:
   → Remove a player** once the game is running. They're sent back to the home
   screen with a reason; if it was their turn, it passes on rather than
   stranding the round.
-- **Reconnect is automatic.** Dropped signal or a reloaded tab picks back up
-  in the same room — same team, same turn, current word in hand. If the device
-  lost its saved session entirely (cleared storage, flat battery, borrowed
-  phone), just rejoin the room with **the same name** — a disconnected slot is
-  handed back with its team and score intact, even if hot join is off. Only
-  slots that are actually disconnected can be reclaimed, so this can't boot a
-  player who's still connected.
+- **Your name is your identity**, and names are unique within a room.
+  Reconnecting is automatic — a dropped signal or reloaded tab picks back up in
+  the same room, same team, same turn, current word in hand. If the device lost
+  its saved session entirely (cleared storage, flat battery, borrowed phone, or
+  the server restarted under you), just rejoin with **the same name**:
+  - if that name is **still connected**, you get an error — a seat is never
+    taken from someone actively playing. That check probes the socket rather
+    than trusting the last-known flag, so a device you just put down doesn't
+    lock you out of your own name;
+  - if it's **offline**, you're asked to confirm ("already in this room but
+    offline — join back as them?") and then get the slot back with its team and
+    score attribution, even if hot join is off. If you were host and the seat
+    was only handed on *because* you dropped, it comes back with you; a
+    connected host who took over keeps it, so a flaky phone can't yank control
+    mid-game.
 - **Between rounds** the next round is held shut until everyone taps **I'm
   ready**, on a screen showing the round that just finished and the running
   total. The host can **Start the round now** to skip the wait, and the gate
@@ -152,6 +165,15 @@ Beyond the Quick start walkthrough above, good to know while hosting:
   same people with the same settings — same room code, nobody rejoins, scores
   reset. Leave/Play again stay pinned to the bottom of that screen rather than
   below a long scroll.
+- **Idle phones stay in the game.** Only the drawer is looking at their screen;
+  everyone else puts theirs down, and a suspended mobile tab stops answering
+  socket pings. So the disconnect timeout is deliberately *generous* (~85s of
+  silence) rather than eager — "connected" drives the turn rotation, the ready
+  gate and the writing auto-advance, so dropping idle players skips their turns
+  and can stall a round. The one case where waiting hurts — picking up a second
+  device and finding your own name in use — is handled precisely instead, by
+  probing that one socket at that moment. A genuinely stuck drawer has the
+  host's **Skip stuck drawer**.
 - **Crash recovery.** If the container restarts mid-game (power blip,
   redeploy), it reloads paused; the active drawer just taps **Resume**.
 
@@ -208,7 +230,10 @@ Bots write their own words and play their own turns (random correct/pass with a
 short delay), so you can hit the 4-player minimum with 1-2 real devices.
 
 **From the UI** (host-only, lobby): **🤖 +1** / **🤖 Fill to 4** / **Remove
-bots**. Best for a demo — no terminal needed. Bots write real phrases by asking
+bots**. Best for a demo — no terminal needed. Bots get real names behind a
+reserved `[🤖] ` prefix (`[🤖] Jill`) that people are refused if they try to
+type it: names are the identity here, so a human "Jill" and a bot "Jill" would
+be indistinguishable on the one field that decides who you are. Bots write real phrases by asking
 for suggestions through the same `suggest-words` event the 🎲 buttons use, so
 their words are playable and de-duplicated against everyone else's.
 
@@ -378,7 +403,9 @@ client/src/
   types.ts          shared types, team/round label+color/icon maps
   screens/          Landing, Lobby, Writing, Turn, RoundIntermission, Scores
   alert.ts          all game sounds + vibration (Web Audio, no asset shipped)
-  components/       PaperSlip (fold animation), Confetti, RulesDialog,
+  components/       PaperCutIntro (sheet -> slips), PaperSlip (3D hinge
+                    reveal), FoldingSlip (fold into the box), Confetti,
+                    RulesDialog,
                     PlayerName, MyNameBadge, AdminDrawer, Toast,
                     SoundToggle, GameSounds
 ```
@@ -426,3 +453,39 @@ What *is* hardened, because these bite even on a friendly LAN:
 - Voluntary "Leave room" fully removes the player slot; an involuntary
   disconnect just marks them offline and keeps the slot for reconnect —
   these are deliberately different code paths.
+- The paper is the whole metaphor, so the slips behave like paper. You *write*
+  on a slip (painted paper behind a transparent input), fold it down the centre
+  and drop it in the box on submit, and a drawn slip is *unfolded*: one half
+  hinges around the crease from rotateY(-180°) to 0°, showing its blank back
+  until it opens. It is deliberately not a scaleX stretch — that grows the
+  writing along with the paper, which real paper doesn't do. Both halves render
+  the same full-width face and clip to their own side, so the phrase reads
+  across the crease. You hold the left half and the *right* one is the flap —
+  hinge the other and the slip sits on the right and opens leftward, which reads
+  as running backwards. The flap's back is a shade darker than its front, or a
+  fold onto identical paper just merges into the half beneath it; and the held
+  writing screen opens by cutting a sheet into slips, built as the finished
+  slips already stacked edge to edge so the "cut" is the gaps opening between
+  them — which is also what lands the strips exactly where the rows appear,
+  instead of needing two layouts to agree pixel for pixel. The
+  ink is plain, with no fade — opening the paper *is* the reveal, and you read
+  more of the phrase the further the flap swings. Slips are then *handled* the
+  way the real ones are: drawn up out of the box below, and leaving by whichever
+  route matches what happened to them — a guessed one is lifted away still open
+  (nobody refolds one they just won), a passed one folds shut and drops back in,
+  because it will come round again. A turn that simply runs out is treated as a
+  pass, since that slip does go back in the bag. Each phase waits for the last,
+  or it reads as one slip morphing rather than paper being handled. The whole
+  chain is ~1s and plays after every guess, so the constants at the top of
+  PaperSlip.tsx are the knob if it ever feels long mid-turn. Submitting runs the same
+  hinge in reverse, in place on the writing screen, and the slips fold and drop
+  into a box **before** anything is sent — you fold your paper and put it in the
+  box, and only then are you ready. Two things here are
+  easy to get subtly wrong and are pinned by tests: `.paper-surface` paints and
+  never positions (its `inset: 0` once over-constrained the halves so both showed
+  the same side of the phrase), and both faces pin to the same edge with the
+  right one shifted, never one-left-one-right. The slip is also a deliberately
+  *flat* stacking context with the perspective on it — `preserve-3d` there
+  depth-sorts the halves, making `z-index` inert and leaving the flap to flicker
+  and settle *under* the half it folds onto. All of it is skipped under
+  `prefers-reduced-motion`.

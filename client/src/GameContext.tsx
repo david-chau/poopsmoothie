@@ -19,7 +19,11 @@ interface GameContextValue {
   notice: string | null;
   dismissNotice: () => void;
   createRoom: (name: string) => Promise<{ ok: boolean; error?: string }>;
-  joinRoom: (roomCode: string, name: string) => Promise<{ ok: boolean; error?: string }>;
+  joinRoom: (
+    roomCode: string,
+    name: string,
+    opts?: { reclaim?: boolean },
+  ) => Promise<{ ok: boolean; error?: string; nameTaken?: boolean; canReclaim?: boolean; name?: string }>;
   leaveToLanding: () => void;
 }
 
@@ -94,7 +98,7 @@ export function GameProvider({ children }: { children: ReactNode }) {
     return res;
   }
 
-  async function joinRoom(roomCode: string, name: string) {
+  async function joinRoom(roomCode: string, name: string, opts: { reclaim?: boolean } = {}) {
     const res = await emitAck<{
       ok: boolean;
       error?: string;
@@ -102,7 +106,12 @@ export function GameProvider({ children }: { children: ReactNode }) {
       playerId: string;
       secret: string;
       reclaimed?: boolean;
-    }>('join-room', { roomCode, name });
+      /** the name is in use by someone still connected */
+      nameTaken?: boolean;
+      /** the name exists but is offline — ask before assuming their identity */
+      canReclaim?: boolean;
+      name?: string;
+    }>('join-room', { roomCode, name, reclaim: opts.reclaim });
     if (res.ok) {
       const id = { roomCode: res.roomCode, playerId: res.playerId, secret: res.secret };
       saveIdentity(id);

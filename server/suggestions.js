@@ -59,9 +59,23 @@ function normalize(word) {
     .toLowerCase();
 }
 
+/** What we've recently handed out per room, so two callers asking at the same
+ *  moment don't get the same phrase. Submissions alone aren't enough: nothing
+ *  is submitted yet at the point three bots (or three people tapping 🎲) ask
+ *  together, so every one of them sees the same empty "taken" set.
+ *  In memory only — it's a de-dup hint, not game state worth persisting. */
+const recentlyOffered = new Map(); // roomCode -> normalized string[]
+const OFFER_MEMORY = 60;
+
+/** Drop a room's offer history when the room goes away. */
+export function forgetRoom(roomCode) {
+  recentlyOffered.delete(roomCode);
+}
+
 /** Pick up to `count` suggestions nobody in the room has used yet.
- *  Excludes every submitted word plus `exclude` (the caller's own in-progress,
- *  not-yet-submitted boxes). Returns fewer than asked only if the pool runs dry. */
+ *  Excludes every submitted word, `exclude` (the caller's own in-progress,
+ *  not-yet-submitted boxes), and anything just offered to someone else.
+ *  Returns fewer than asked only if the pool runs dry. */
 export function suggestWords(room, count, exclude = []) {
   const taken = new Set();
   for (const words of Object.values(room.submissions ?? {})) {
@@ -70,12 +84,17 @@ export function suggestWords(room, count, exclude = []) {
   for (const word of exclude) taken.add(normalize(word));
   taken.delete(''); // empty boxes aren't a collision
 
-  const pool = SUGGESTIONS.filter((word) => !taken.has(normalize(word)));
+  const offered = recentlyOffered.get(room.code) ?? [];
+  let pool = SUGGESTIONS.filter((word) => !taken.has(normalize(word)) && !offered.includes(normalize(word)));
+  // the offer history is a nicety, never a reason to hand back nothing
+  if (pool.length < count) pool = SUGGESTIONS.filter((word) => !taken.has(normalize(word)));
+
   const picked = [];
   // splice-from-a-copy = sampling without replacement, so one call never
   // hands the same player the same phrase twice
   for (let i = 0; i < count && pool.length > 0; i++) {
     picked.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
   }
+  recentlyOffered.set(room.code, [...offered, ...picked.map(normalize)].slice(-OFFER_MEMORY));
   return picked;
 }

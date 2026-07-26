@@ -5,6 +5,7 @@ import * as suggestions from './suggestions.js';
 import * as bots from './bots.js';
 
 const ROUND_PHASES = ['ROUND1', 'ROUND2', 'ROUND3'];
+const INVALID_NAME = 'Invalid name — that prefix is reserved for bots';
 
 /** Public snapshot broadcast to the whole room. Never contains slip text
  *  (gaps #1/#O) — only counts, scores, and identifiers. */
@@ -116,6 +117,25 @@ function selfUrl() {
   return process.env.SELF_URL || `http://127.0.0.1:${process.env.PORT || 4321}`;
 }
 
+/**
+ * Is this socket actually there, right now?
+ *
+ * `player.connected` only turns false once socket.io's ping cycle gives up, and
+ * that is deliberately generous (~85s — see index.js: idle phones must stay in
+ * the game). Which leaves one bad window: picking up a second device and being
+ * told your own name is "already playing". Rather than making the global
+ * timeouts eager enough to cover it — which would evict every player whose
+ * screen locked — ask the one socket in question and give it a moment to
+ * answer.
+ */
+function isSocketAlive(io, socketId, ms = 1200) {
+  const sock = socketId && io.sockets.sockets.get(socketId);
+  if (!sock) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    sock.timeout(ms).emit('are-you-there', (err) => resolve(!err));
+  });
+}
+
 /** Clamp to a range, keeping the old value for anything non-numeric. Without
  *  the NaN check, `{}` or "abc" clamped to NaN and wrote NaN into the config —
  *  wordsPerPlayer:NaN makes submit-words reject every submission, so the room
@@ -143,11 +163,15 @@ export function registerSocketHandlers(io, socket) {
       // `emit(event, cb)` with no payload puts the callback in the first slot
       const ack = typeof maybeAck === 'function' ? maybeAck : typeof payload === 'function' ? payload : undefined;
       const data = payload && typeof payload === 'object' ? payload : {};
-      try {
-        handler(data, ack);
-      } catch (err) {
+      const fail = (err) => {
         console.error(`socket handler '${event}' threw:`, err);
         ack?.({ ok: false, error: 'server error' });
+      };
+      try {
+        // a rejected promise from an async handler is just as fatal as a throw
+        Promise.resolve(handler(data, ack)).catch(fail);
+      } catch (err) {
+        fail(err);
       }
     });
   }
@@ -185,6 +209,7 @@ export function registerSocketHandlers(io, socket) {
   on('list-lobbies', (_data, ack) => ack?.({ ok: true, lobbies: publicLobbies() }));
 
   on('create-room', ({ name } = {}, ack) => {
+    if (rooms.isReservedName(name)) return ack?.({ ok: false, error: INVALID_NAME });
     if (rooms.roomCount() >= rooms.MAX_ROOMS) {
       return ack?.({ ok: false, error: 'too many rooms on this server right now' });
     }
@@ -199,21 +224,47 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, roomCode: room.code, playerId: player.id, secret: player.secret });
   });
 
-  on('join-room', ({ roomCode, name, botToken } = {}, ack) => {
+  on('join-room', async ({ roomCode, name, botToken, reclaim } = {}, ack) => {
     const room = rooms.getRoom(roomCode);
     if (!room) return ack?.({ ok: false, error: 'room not found' });
+    // bots are named by the server; a person taking that prefix would make the
+    // two indistinguishable on the one field used as identity. Bots themselves
+    // arrive with a token, so they're exempt.
+    if (!botToken && rooms.isReservedName(name)) return ack?.({ ok: false, error: INVALID_NAME });
 
-    // Before treating this as a new arrival: is there a disconnected slot with
-    // this name? Then it's someone coming back on a device that lost its
-    // credentials, and they should get their own team and score back rather
-    // than a fresh slot. Checked ahead of canJoin so they can return even after
-    // the doors have shut.
-    const reclaimed = rooms.reclaimSlot(room, name);
+    // The name is the identity, so an existing name means "I am that player".
+    // What that entitles you to depends on whether they're still here.
+    const existing = rooms.findByName(room, name);
+    if (existing?.connected) {
+      // Don't take socket.io's word for it — this is exactly the case where
+      // someone has just picked up a second device and the old one may already
+      // be dead, with the ping cycle yet to notice.
+      if (await isSocketAlive(io, existing.socketId)) {
+        return ack?.({ ok: false, nameTaken: true, error: `"${existing.name}" is already playing in this room` });
+      }
+      existing.connected = false;
+      existing.socketId = null;
+      handleDisconnectSideEffects(io, room, existing);
+      persistAndBroadcast(io, room);
+    }
+    if (existing && !reclaim) {
+      // don't silently assume an identity — let the client confirm it's them
+      return ack?.({
+        ok: false,
+        canReclaim: true,
+        name: existing.name,
+        error: `"${existing.name}" is already in this room but offline`,
+      });
+    }
+    // Checked ahead of canJoin so you can get back in even after the doors shut.
+    const reclaimed = existing && rooms.reclaimSlot(room, name);
     if (reclaimed) {
       reclaimed.player.socketId = socket.id;
       socket.data.roomCode = room.code;
       socket.data.playerId = reclaimed.player.id;
       socket.join(room.code);
+      // the seat was only on loan while they were gone
+      if (reclaimed.wasHost) room.hostId = reclaimed.player.id;
       rooms.transferHostIfNeeded(room);
       game.recoverStrandedTurn(room);
       persistAndBroadcast(io, room);
@@ -233,6 +284,9 @@ export function registerSocketHandlers(io, socket) {
     if (bots.claimBotToken(room.code, botToken)) player.isBot = true;
     game.addLatePlayer(room, player); // mid-game joiner needs a slot in the rotation
     player.socketId = socket.id;
+    // the seat stays with an absent human rather than going to a bot, so a real
+    // arrival should be able to pick up one nobody is sitting in
+    rooms.transferHostIfNeeded(room);
     socket.data.roomCode = room.code;
     socket.data.playerId = player.id;
     socket.join(room.code);
@@ -548,6 +602,7 @@ export function registerSocketHandlers(io, socket) {
     io.socketsLeave(code); // nobody left to broadcast to after this
     rooms.destroyRoom(code);
     bots.forgetRoom(code);
+    suggestions.forgetRoom(code);
     persist.deleteRoom(code);
     broadcastLobbies(io); // it just stopped being joinable
     ack?.({ ok: true });
@@ -594,6 +649,7 @@ export function registerSocketHandlers(io, socket) {
     if (ctx.room.players.size === 0) {
       rooms.destroyRoom(ctx.room.code);
       bots.forgetRoom(ctx.room.code);
+      suggestions.forgetRoom(ctx.room.code);
       persist.deleteRoom(ctx.room.code);
       broadcastLobbies(io);
       return ack?.({ ok: true });

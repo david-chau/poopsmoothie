@@ -3,12 +3,19 @@ import { useGame } from '../GameContext';
 import { emitAck } from '../socket';
 import { primeAudio, submitted } from '../alert';
 import RulesDialog from '../components/RulesDialog';
+import { FoldingSlip, SlipBox, foldAwayDurationMs } from '../components/FoldingSlip';
+import PaperCutIntro from '../components/PaperCutIntro';
 
 export default function Writing() {
   const { state, identity, isHost, leaveToLanding } = useGame();
   const [words, setWords] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // words held while they fold into the box, so the animation has something to
+  // show after the inputs are gone
+  const [folding, setFolding] = useState<string[] | null>(null);
+  // the sheet-into-slips intro, once per visit to the writing screen
+  const [cutting, setCutting] = useState(true);
   const rulesRef = useRef<HTMLDialogElement>(null);
   if (!state || !identity) return null;
 
@@ -28,14 +35,31 @@ export default function Writing() {
     setWords(next);
   }
 
+  /**
+   * Fold, drop in the box, *then* submit — in that order, and the screen doesn't
+   * move on until it's done.
+   *
+   * Submitting first meant the server's reply flipped `hasSubmitted` immediately
+   * and the "words in" view replaced the animation before it could play. Doing
+   * the physical part first also matches the table: you fold your slips and put
+   * them in the box, and only then are you ready.
+   */
   async function submit() {
     primeAudio(); // user gesture: unlock audio here so the round sounds work later
+    // checked here rather than after the animation — the server would reject an
+    // empty slip, and animating first would make that rejection arrive late
+    if (values.some((v) => !v.trim())) return setError(`Fill in all ${n} slips first`);
+
     setBusy(true);
     setError(null);
+    setFolding(values);
+    await new Promise((resolve) => setTimeout(resolve, foldAwayDurationMs(values.length)));
+    submitted(); // they've landed in the box
+
     const res = await emitAck<{ ok: boolean; error?: string }>('submit-words', { words: values });
     setBusy(false);
+    setFolding(null);
     setError(res.ok ? null : (res.error ?? 'could not submit'));
-    if (res.ok) submitted();
   }
 
   async function forceStart() {
@@ -112,32 +136,57 @@ export default function Writing() {
         Write {n} words or phrases
       </h1>
       <p className="subtitle">Nouns, names, films, things people do — anything guessable. Keep them varied!</p>
+      {cutting && !hasSubmitted ? (
+        <PaperCutIntro count={n} onDone={() => setCutting(false)} />
+      ) : (
+        <>
       {values.map((v, i) => (
         <div key={i} className="word-row">
-          <input
-            className="word-input"
-            value={v}
-            onChange={(e) => setWord(i, e.target.value)}
-            placeholder={`Word or phrase ${i + 1}`}
-            maxLength={80}
-          />
-          <button
-            className="btn dice-btn"
-            onClick={() => suggestOne(i)}
-            aria-label={`Suggest a word or phrase for slot ${i + 1}`}
-            title="Suggest one for me"
-          >
-            🎲
-          </button>
+          {/* a slip you write on, not a form field: painted paper behind a
+              transparent input, so the ink sits on the paper itself */}
+          {folding ? (
+            <FoldingSlip text={v} index={i} total={values.length} />
+          ) : (
+            <div className="write-slip">
+              <div className="paper-surface write-slip-paper" />
+              <input
+                className="write-slip-input"
+                value={v}
+                onChange={(e) => setWord(i, e.target.value)}
+                placeholder={`Word or phrase ${i + 1}`}
+                maxLength={80}
+              />
+            </div>
+          )}
+          {/* gone once folding starts: there is nothing left to re-roll, and
+              leaving it there pushed the slips off-centre from the box */}
+          {!folding && (
+            <button
+              className="btn dice-btn"
+              onClick={() => suggestOne(i)}
+              aria-label={`Suggest a word or phrase for slot ${i + 1}`}
+              title="Suggest one for me"
+            >
+              🎲
+            </button>
+          )}
         </div>
       ))}
-      <button className="btn" onClick={suggestRest} disabled={!hasEmpty}>
-        🎲 Fill the empty ones for me
-      </button>
-      {error && <p className="error">{error}</p>}
-      <button className="btn btn-primary btn-bottom" disabled={busy} onClick={submit}>
-        Submit
-      </button>
+      {folding ? (
+        <SlipBox />
+      ) : (
+        <>
+          <button className="btn" onClick={suggestRest} disabled={!hasEmpty}>
+            🎲 Fill the empty ones for me
+          </button>
+          {error && <p className="error">{error}</p>}
+          <button className="btn btn-primary btn-bottom" disabled={busy} onClick={submit}>
+            Submit
+          </button>
+        </>
+      )}
+        </>
+      )}
     </div>
   );
 }

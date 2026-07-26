@@ -29,6 +29,12 @@ export function clearIdentity() {
 // so phones reach it over LAN by NAS IP with no CORS config needed.
 export const socket: Socket = io();
 
+// The server asks this when someone else tries to join under our name, to tell
+// a live tab from a socket it hasn't noticed is dead yet. Answering keeps the
+// name; staying silent hands it over — so this must be registered on the module,
+// not inside a component that might not be mounted.
+socket.on('are-you-there', (ack?: () => void) => ack?.());
+
 /** gap #14: re-fires on every transport reconnect (new sid), not just first mount. */
 export function wireAutoRejoin(onFailed: () => void) {
   socket.on('connect', () => {

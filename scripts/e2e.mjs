@@ -31,7 +31,11 @@ function docker(args, opts = {}) {
 }
 function dockerAvailable() {
   try {
-    docker(['--version']);
+    // `docker --version` only proves the CLI is installed — it answers happily
+    // with Docker Desktop closed, and the build then fails with "Cannot connect
+    // to the Docker daemon". `info` actually talks to the daemon, so these
+    // tests skip instead of failing when Docker just isn't running.
+    docker(['info'], { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -97,7 +101,7 @@ after(() => {
   fs.rmSync(DATA_DIR, { recursive: true, force: true });
 });
 
-test('serves the SPA (including the /join/<code> deep link route)', { skip: !HAVE_DOCKER && 'docker not available' }, async () => {
+test('serves the SPA (including the /join/<code> deep link route)', { skip: !HAVE_DOCKER && 'docker daemon not running' }, async () => {
   await waitHttp();
   const root = await fetch(`${URL}/`);
   assert.equal(root.status, 200);
@@ -106,7 +110,7 @@ test('serves the SPA (including the /join/<code> deep link route)', { skip: !HAV
   assert.ok((await join.text()).includes('<div id="root">'), 'join route serves the SPA shell');
 });
 
-test('full game: 4 players, bots auto-submit and auto-play, scoring works', { skip: !HAVE_DOCKER && 'docker not available' }, async () => {
+test('full game: 4 players, bots auto-submit and auto-play, scoring works', { skip: !HAVE_DOCKER && 'docker daemon not running' }, async () => {
   await waitHttp();
   const host = await connect();
   let state = null;
@@ -134,7 +138,7 @@ test('full game: 4 players, bots auto-submit and auto-play, scoring works', { sk
   }
 });
 
-test('crash recovery: a real container restart reloads the game paused, drawer resumes', { skip: !HAVE_DOCKER && 'docker not available', timeout: 60000 }, async () => {
+test('crash recovery: a real container restart reloads the game paused, drawer resumes', { skip: !HAVE_DOCKER && 'docker daemon not running', timeout: 60000 }, async () => {
   await waitHttp();
 
   // set up a game paused mid-turn with the host as the drawer

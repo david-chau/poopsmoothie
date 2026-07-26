@@ -142,3 +142,122 @@ test('getRoom tolerates any JSON type a client can send', () => {
     assert.equal(rooms.getRoom(bad), undefined);
   }
 });
+
+test('names identify players, so a room never holds two of the same', () => {
+  const room = rooms.newRoom();
+  const first = rooms.addPlayer(room, 'Dave');
+  // reclaim covers the same-person case; this is the fallback (e.g. a human
+  // typing a bot's name, which reclaim deliberately refuses to hand over)
+  const second = rooms.addPlayer(room, 'Dave');
+  assert.notEqual(second.name, first.name);
+  const names = [...room.players.values()].map((p) => p.name.toLowerCase());
+  assert.equal(new Set(names).size, names.length);
+});
+
+test('reclaim refuses a connected slot and takes a disconnected one', () => {
+  const room = rooms.newRoom();
+  const dave = rooms.addPlayer(room, 'Dave');
+
+  assert.equal(rooms.reclaimSlot(room, 'Dave'), null, 'never take a live seat');
+
+  dave.connected = false;
+  const back = rooms.reclaimSlot(room, ' dave '); // trimmed + case-insensitive
+  assert.ok(back);
+  assert.equal(back.player.id, dave.id);
+  assert.equal(back.player.connected, true);
+  assert.ok(rooms.findPlayerBySecret(room, dave.id, back.secret), 'fresh credentials work');
+});
+
+test('a bot cannot be impersonated by name', () => {
+  const room = rooms.newRoom();
+  const bot = rooms.addPlayer(room, 'Bot 1');
+  bot.isBot = true;
+  bot.connected = false;
+  assert.equal(rooms.reclaimSlot(room, 'Bot 1'), null);
+  assert.equal(rooms.findByName(room, 'Bot 1'), null);
+});
+
+test('host is only handed back to whoever actually lost it by dropping', () => {
+  const room = rooms.newRoom();
+  const dave = rooms.addPlayer(room, 'Dave'); // first in, so host
+  const bob = rooms.addPlayer(room, 'Bob');
+  assert.equal(room.hostId, dave.id);
+
+  dave.connected = false;
+  rooms.transferHostIfNeeded(room);
+  assert.equal(room.hostId, bob.id, 'room must not be left hostless');
+
+  assert.equal(rooms.reclaimSlot(room, 'Dave').wasHost, true);
+
+  // Bob never held it before dropping, so coming back grants him nothing
+  bob.connected = false;
+  assert.equal(rooms.reclaimSlot(room, 'Bob').wasHost, false);
+});
+
+// A bot has no UI, so a bot holding the host seat means the admin controls
+// exist for nobody. In a solo-plus-bots game this happened on every refresh:
+// the human dropped for an instant, the seat went to the first "connected"
+// player, and rejoining found a connected host and left it there.
+test('the host seat never goes to a bot', () => {
+  const room = rooms.newRoom();
+  const human = rooms.addPlayer(room, 'David');
+  const bot = rooms.addPlayer(room, 'Bot 1');
+  bot.isBot = true;
+
+  human.connected = false; // a refresh
+  rooms.transferHostIfNeeded(room);
+  assert.equal(room.hostId, human.id, 'seat waits for them rather than going to the bot');
+
+  human.connected = true;
+  rooms.transferHostIfNeeded(room);
+  assert.equal(room.hostId, human.id, 'and is theirs again on return');
+});
+
+test('a seat already held by a bot is repaired', () => {
+  const room = rooms.newRoom();
+  const bot = rooms.addPlayer(room, 'Bot 1');
+  bot.isBot = true;
+  const human = rooms.addPlayer(room, 'Ana');
+  room.hostId = bot.id; // e.g. a room persisted before this rule existed
+
+  rooms.transferHostIfNeeded(room);
+  assert.equal(room.hostId, human.id);
+});
+
+test('a connected human still takes over from one who dropped', () => {
+  const room = rooms.newRoom();
+  const dave = rooms.addPlayer(room, 'Dave');
+  const bot = rooms.addPlayer(room, 'Bot 1');
+  bot.isBot = true;
+  const ana = rooms.addPlayer(room, 'Ana');
+
+  dave.connected = false;
+  rooms.transferHostIfNeeded(room);
+  assert.equal(room.hostId, ana.id, 'a human is available, so the room is not left hostless');
+  assert.equal(dave.wasHost, true, 'and Dave gets it back when he returns');
+});
+
+test('the host leaving hands the seat to a human, never a bot', () => {
+  const room = rooms.newRoom();
+  const dave = rooms.addPlayer(room, 'Dave');
+  const bot = rooms.addPlayer(room, 'Bot 1');
+  bot.isBot = true;
+  const ana = rooms.addPlayer(room, 'Ana');
+
+  rooms.removePlayer(room, dave.id);
+  assert.equal(room.hostId, ana.id);
+});
+
+// Names are the identity, so bots need a namespace of their own — otherwise a
+// human "Jill" and a bot "Jill" are indistinguishable on the one field that
+// decides who you are.
+test('the bot prefix is reserved against people', () => {
+  assert.ok(rooms.isReservedName(`${rooms.BOT_NAME_PREFIX}Jill`));
+  assert.ok(rooms.isReservedName('  [🤖]  sneaky  '), 'trimmed and case-insensitive');
+  assert.ok(rooms.isReservedName('[🤖]nospace'));
+  assert.equal(rooms.isReservedName('Jill'), false);
+  assert.equal(rooms.isReservedName('Robot Lover'), false);
+  assert.equal(rooms.isReservedName('my [🤖] friend'), false, 'only the prefix is reserved');
+  assert.equal(rooms.isReservedName(''), false);
+  assert.equal(rooms.isReservedName(undefined), false);
+});

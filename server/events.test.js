@@ -33,9 +33,13 @@ after(() => {
   httpServer.close();
 });
 
-function connect() {
+/** A client that behaves like the real one, which answers the server's liveness
+ *  probe (see socket.ts). `alive: false` simulates a locked phone or dead wifi:
+ *  the socket is still open server-side but nothing is running to reply. */
+function connect({ alive = true } = {}) {
   return new Promise((resolve) => {
     const c = ioClient(url, { reconnection: false, forceNew: true });
+    if (alive) c.on('are-you-there', (cb) => cb?.());
     clients.push(c);
     c.once('connect', () => resolve(c));
   });
@@ -92,7 +96,10 @@ test('join-room: works in lobby, rejected after the game has started', async () 
   const host = await connect();
   const create = await ack(host, 'create-room', { name: 'Host' });
   const joiners = await Promise.all([connect(), connect(), connect()]);
-  for (const j of joiners) assert.equal((await ack(j, 'join-room', { roomCode: create.roomCode, name: 'x' })).ok, true);
+  // distinct names: the name is the identity, so three "x"s would be one player
+  for (const [i, j] of joiners.entries()) {
+    assert.equal((await ack(j, 'join-room', { roomCode: create.roomCode, name: `J${i}` })).ok, true);
+  }
 
   await ack(host, 'set-config', { wordsPerPlayer: 1, hotJoin: false }); // doors shut at start
   await ack(host, 'start-game');
@@ -127,7 +134,7 @@ test('start-game: host-only and requires at least 4 players', async () => {
   assert.equal((await ack(host, 'start-game')).ok, false); // only 1 player
 
   const joiners = await Promise.all([connect(), connect(), connect()]);
-  for (const j of joiners) await ack(j, 'join-room', { roomCode: create.roomCode, name: 'x' });
+  for (const [i, j] of joiners.entries()) await ack(j, 'join-room', { roomCode: create.roomCode, name: `J${i}` });
   assert.equal((await ack(joiners[0], 'start-game')).ok, false); // not host
   assert.equal((await ack(host, 'start-game')).ok, true);
 });
@@ -474,9 +481,12 @@ test('a player who lost their credentials reclaims their slot by name', async ()
   await wait(80);
   assert.equal(getState().players.find((p) => p.id === victim.id).connected, false);
 
-  // they come back and just type their name — no secret to offer
+  // they come back and just type their name — no secret to offer. First reply
+  // is the "is this you?" question; confirming completes the reclaim.
   const returning = await connect();
-  const res = await ack(returning, 'join-room', { roomCode, name: victim.name });
+  const asked = await ack(returning, 'join-room', { roomCode, name: victim.name });
+  assert.equal(asked.canReclaim, true);
+  const res = await ack(returning, 'join-room', { roomCode, name: victim.name, reclaim: true });
   assert.equal(res.ok, true);
   assert.equal(res.reclaimed, true);
   assert.equal(res.playerId, victim.id, 'same slot, not a new player');
@@ -489,15 +499,116 @@ test('a player who lost their credentials reclaims their slot by name', async ()
   assert.equal(after.players.find((p) => p.id === victim.id).connected, true);
 });
 
-test('reclaim never steals a slot from someone still connected', async () => {
+test('a name in use by someone still connected is refused', async () => {
   const host = await connect();
   const create = await ack(host, 'create-room', { name: 'Dave' });
+  await wait(50);
+
   const impostor = await connect();
   const res = await ack(impostor, 'join-room', { roomCode: create.roomCode, name: 'Dave' });
+  assert.equal(res.ok, false, 'never take a seat from someone actively playing');
+  assert.equal(res.nameTaken, true);
+  assert.match(res.error, /already playing/i);
 
-  assert.equal(res.ok, true);
-  assert.notEqual(res.playerId, create.playerId, 'got a new slot, not the live one');
-  assert.notEqual(res.reclaimed, true);
+  // even asking to reclaim outright doesn't get you in
+  const forced = await ack(impostor, 'join-room', { roomCode: create.roomCode, name: 'Dave', reclaim: true });
+  assert.equal(forced.ok, false);
+  assert.equal(forced.nameTaken, true);
+});
+
+test('an offline name is offered back, but only once you confirm', async () => {
+  const dave = await connect();
+  const create = await ack(dave, 'create-room', { name: 'Dave' });
+  const bob = await connect();
+  const state = latestStateOf(bob);
+  await ack(bob, 'join-room', { roomCode: create.roomCode, name: 'Bob' });
+  await wait(50);
+
+  dave.disconnect();
+  await wait(80);
+
+  // first attempt is a question, not a join
+  const newDevice = await connect();
+  const asked = await ack(newDevice, 'join-room', { roomCode: create.roomCode, name: 'Dave' });
+  assert.equal(asked.ok, false);
+  assert.equal(asked.canReclaim, true);
+  assert.equal(asked.name, 'Dave');
+  await wait(50);
+  assert.equal(state().players.find((p) => p.name === 'Dave').connected, false, 'nothing happened yet');
+
+  // confirmed: same slot, fresh credentials, no second Dave
+  const joined = await ack(newDevice, 'join-room', { roomCode: create.roomCode, name: 'Dave', reclaim: true });
+  assert.equal(joined.ok, true);
+  assert.equal(joined.reclaimed, true);
+  assert.equal(joined.playerId, create.playerId);
+  assert.notEqual(joined.secret, create.secret);
+  await wait(80);
+  assert.equal(state().players.length, 2, 'never two Daves');
+});
+
+test('a returning host takes the seat back, since it was only on loan', async () => {
+  const dave = await connect();
+  const create = await ack(dave, 'create-room', { name: 'Dave' });
+  const bob = await connect();
+  const state = latestStateOf(bob);
+  await ack(bob, 'join-room', { roomCode: create.roomCode, name: 'Bob' });
+  await wait(50);
+  const bobId = state().players.find((p) => p.name === 'Bob').id;
+
+  dave.disconnect();
+  await wait(80);
+  assert.equal(state().hostId, bobId, 'host handed on so the room is not stuck');
+
+  const daveAgain = await connect();
+  await ack(daveAgain, 'join-room', { roomCode: create.roomCode, name: 'Dave', reclaim: true });
+  await wait(80);
+  assert.equal(state().hostId, create.playerId, 'Dave is host again');
+  assert.equal(state().players.length, 2);
+});
+
+test('someone who was never host does not become one by reconnecting', async () => {
+  const dave = await connect();
+  const create = await ack(dave, 'create-room', { name: 'Dave' });
+  const bob = await connect();
+  const state = latestStateOf(dave);
+  await ack(bob, 'join-room', { roomCode: create.roomCode, name: 'Bob' });
+  await wait(50);
+
+  bob.disconnect(); // a non-host drops; host never moves
+  await wait(80);
+  assert.equal(state().hostId, create.playerId);
+
+  const bobAgain = await connect();
+  await ack(bobAgain, 'join-room', { roomCode: create.roomCode, name: 'Bob', reclaim: true });
+  await wait(80);
+  assert.equal(state().hostId, create.playerId, 'Dave still hosts');
+});
+
+test('the bot name prefix is reserved and refused to people', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  await ack(host, 'add-bots', { count: 1 });
+  await until(() => getState()?.players.length === 2);
+
+  const botName = getState().players.find((p) => p.isBot).name;
+  const human = await connect();
+
+  // exactly a bot's name, and merely wearing the prefix, are both refused
+  for (const attempt of [botName, '[🤖] Sneaky', '  [🤖]  hello']) {
+    const res = await ack(human, 'join-room', { roomCode: create.roomCode, name: attempt });
+    assert.equal(res.ok, false, `"${attempt}" should be refused`);
+    assert.match(res.error, /Invalid name/i);
+  }
+  assert.equal((await ack(human, 'create-room', { name: '[🤖] Sneaky' })).ok, false);
+
+  // an ordinary name is unaffected
+  const fine = await ack(human, 'join-room', { roomCode: create.roomCode, name: 'Robot Lover' });
+  assert.equal(fine.ok, true);
+  await wait(80);
+  const names = getState().players.map((p) => p.name);
+  assert.equal(new Set(names.map((n) => n.toLowerCase())).size, names.length, 'names stay unique');
+  await ack(host, 'remove-bots');
 });
 
 // Every host-only event, checked from a non-host socket in one place. These
@@ -613,8 +724,11 @@ test('the ready gate works over the wire, and bots ready themselves', async () =
 
   assert.equal(getState().phase, 'ROUND2');
   assert.equal(getState().round.awaitingReady, true, 'round 2 is held shut');
+  // the gate flips shut before anyone has answered it, so wait for the bots
+  // rather than sampling the instant it closes
+  await until(() => getState().round.readyPlayerIds.length === 3, 5000);
   assert.deepEqual(
-    getState().round.readyPlayerIds.sort(),
+    getState().round.readyPlayerIds.slice().sort(),
     getState()
       .players.filter((p) => p.isBot)
       .map((p) => p.id)
@@ -703,4 +817,79 @@ test('play-again is host-only and only once the game is over', async () => {
   assert.equal(getState().players.length, 4, 'nobody had to rejoin');
   assert.deepEqual(getState().teamScores, { A: 0, B: 0 });
   assert.deepEqual(getState().roundScores, []);
+});
+
+test('a name is only defended by a socket that actually answers', async () => {
+  // A live tab answers the probe and keeps its name...
+  const dave = await connect();
+  const create = await ack(dave, 'create-room', { name: 'Dave' });
+  await wait(50);
+
+  const other = await connect();
+  const refused = await ack(other, 'join-room', { roomCode: create.roomCode, name: 'Dave' });
+  assert.equal(refused.ok, false);
+  assert.equal(refused.nameTaken, true);
+
+  // ...but a socket the server still believes in, which no longer answers
+  // (locked phone, dead wifi — TCP not yet torn down), does not.
+  dave.off('are-you-there');
+  const asked = await ack(other, 'join-room', { roomCode: create.roomCode, name: 'Dave' });
+  assert.equal(asked.ok, false);
+  assert.equal(asked.canReclaim, true, 'offered back rather than blocked for ~15s');
+
+  const joined = await ack(other, 'join-room', { roomCode: create.roomCode, name: 'Dave', reclaim: true });
+  assert.equal(joined.ok, true);
+  assert.equal(joined.playerId, create.playerId);
+});
+
+test('an idle phone stays in the game — only the name probe cares about liveness', async () => {
+  // A locked screen suspends the tab, so it answers nothing. That must not
+  // remove someone from the room: `connected` drives the turn rotation, the
+  // ready gate and the writing auto-advance, so dropping idle players skips
+  // their turns and can stall the round.
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  const napping = await connect({ alive: false }); // phone face-down on the table
+  await ack(napping, 'join-room', { roomCode: create.roomCode, name: 'Sleepy' });
+  await wait(50);
+
+  // someone else's join triggers a probe of *their* name, not of everyone
+  const third = await connect();
+  await ack(third, 'join-room', { roomCode: create.roomCode, name: 'Third' });
+  await wait(80);
+
+  const sleepy = getState().players.find((p) => p.name === 'Sleepy');
+  assert.equal(sleepy.connected, true, 'an idle player is still in the room');
+  assert.equal(getState().players.length, 3);
+});
+
+test('refreshing in a solo game with bots gets the host controls back', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'David' });
+  await ack(host, 'add-bots', { count: 3 });
+  await until(() => getState()?.players.length === 4);
+  assert.equal(getState().hostId, create.playerId);
+
+  // a browser refresh: the socket drops, then comes back with the stored secret
+  host.disconnect();
+  await wait(120);
+
+  const refreshed = await connect();
+  const back = latestStateOf(refreshed);
+  const res = await ack(refreshed, 'rejoin', {
+    roomCode: create.roomCode,
+    playerId: create.playerId,
+    secret: create.secret,
+  });
+  assert.equal(res.ok, true);
+  await wait(120);
+
+  // a bot holding the seat would leave the admin controls with nobody
+  assert.equal(back().hostId, create.playerId, 'the human is host again after a refresh');
+  const holder = back().players.find((p) => p.id === back().hostId);
+  assert.equal(holder.isBot, false);
+
+  await ack(refreshed, 'remove-bots');
 });

@@ -121,10 +121,11 @@ test('host can add bots from the UI and they show up flagged as bots', async () 
   const bots = state.players.filter((p) => p.isBot);
   assert.equal(bots.length, 3);
   assert.equal(state.players.find((p) => p.id === state.hostId).isBot, false); // the human isn't
-  assert.deepEqual(
-    bots.map((p) => p.name).sort(),
-    ['Bot 1', 'Bot 2', 'Bot 3'], // distinct names even though the joins race
-  );
+  // real names behind a reserved prefix, and distinct even though the joins race
+  const { BOT_NAME_PREFIX } = await import('../server/rooms.js');
+  const botNames = bots.map((p) => p.name);
+  assert.equal(new Set(botNames).size, 3);
+  for (const name of botNames) assert.ok(name.startsWith(BOT_NAME_PREFIX), `"${name}" lacks the bot prefix`);
 
   const removed = await ack(host, 'remove-bots');
   assert.equal(removed.removed, 3);

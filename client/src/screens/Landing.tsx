@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { socket, emitAck } from '../socket';
-import { ROUND_LABELS, type Phase } from '../types';
+import { ROUND_LABELS, BOT_NAME_PREFIX, type Phase } from '../types';
 import { primeAudio } from '../alert';
 import RulesDialog from '../components/RulesDialog';
 
@@ -86,9 +86,30 @@ export default function Landing() {
     // unlock audio after a real gesture — this tap is the one every player makes
     primeAudio();
     if (!named) return setError('enter your name first');
+    // the server refuses this too — checked here so it fails as you tap rather
+    // than after a round trip
+    if (name.trim().toLowerCase().startsWith(BOT_NAME_PREFIX.trim().toLowerCase())) {
+      return setError('Invalid name — that prefix is reserved for bots');
+    }
     setBusy(true);
     setError(null);
-    const res = joinCode ? await joinRoom(joinCode, name.trim()) : await createRoom(name.trim());
+    // createRoom's reply is narrower than joinRoom's; widen so the reclaim
+    // fields below are reachable without casting
+    type Outcome = { ok: boolean; error?: string; canReclaim?: boolean; name?: string };
+    let res: Outcome = joinCode ? await joinRoom(joinCode, name.trim()) : await createRoom(name.trim());
+
+    // The name is already in this room but nobody is on it — almost always the
+    // same person on a new device or after a reload. Confirm rather than
+    // silently assuming someone else's identity, team and score.
+    if (!res.ok && res.canReclaim && joinCode) {
+      const confirmed = window.confirm(`"${res.name}" is already in this room but offline. Join back as them?`);
+      if (confirmed) res = await joinRoom(joinCode, name.trim(), { reclaim: true });
+      else {
+        setBusy(false);
+        return setError('Pick a different name to join as someone new.');
+      }
+    }
+
     setBusy(false);
     if (!res.ok) setError(res.error ?? (joinCode ? 'could not join room' : 'could not create room'));
   }

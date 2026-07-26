@@ -493,26 +493,88 @@ input:focus,
   align-items: center;
   justify-content: center;
   min-height: 30vh;
-  perspective: 800px;
 }
 
-/* folded paper: .paper-wrap sizes the box (padding + text), .paper-paper is an
-   absolutely-positioned layer underneath that does the scaleX unfold so the
-   text itself never gets stretched by the transform. */
-.paper-slip-wrap {
+/* The folded slip. Two halves of one face, side by side; only the left one
+   moves. preserve-3d so the rotating half keeps its depth relative to the
+   stage instead of being flattened into it. */
+/* Perspective lives here, and this element stays FLAT on purpose.
+   With `transform-style: preserve-3d` the two halves get depth-sorted, which
+   means z-index is ignored and the flap fights the half it folds onto for who
+   paints on top — coplanar at the end of the swing, so it flickers and lands
+   underneath. Flat, they simply paint in DOM order: the flap is the later
+   sibling, so it is always above, always. Each half still declares its own
+   preserve-3d below, which is all the front/back faces need. */
+.slip {
   position: relative;
+  display: flex;
   width: 100%;
   max-width: 520px;
   min-height: clamp(140px, 30vw, 220px);
+  perspective: 1400px;
+}
+
+.slip-half {
+  position: relative;
+  flex: 0 0 50%;
+  width: 50%;
+  transform-style: preserve-3d;
+}
+
+/* The right half is the flap, hinged on the crease — its own left edge. The
+   left half is the one you're holding and never moves. Hinging the left half
+   instead makes the folded slip sit on the right and open leftward, which
+   reads as the animation running backwards. */
+.slip-half-right {
+  transform-origin: left center;
+  /* no z-index here: it would be ignored in a 3D context anyway, and .slip is
+     flat now, so DOM order already puts this half on top */
+}
+
+/* Clipping lives here rather than on .slip-half: `overflow: hidden` forces
+   flat transform-style, which would kill both the 3D and the backface test on
+   the rotating half. Keeping them separate lets the half rotate in 3D while
+   each face still clips to its own side. */
+.slip-clip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  backface-visibility: hidden;
+}
+
+/* only visible once the half has swung past edge-on */
+.slip-clip-back {
+  transform: rotateY(180deg);
+}
+
+/* the full slip, twice the width of the half that clips it — anchored so both
+   halves' text centres land on the crease and the phrase reads across it */
+.slip-face {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 200%;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: clamp(1.5rem, 6vw, 3rem);
+  padding: clamp(1rem, 4vw, 2.25rem);
 }
 
-.paper-slip-paper {
-  position: absolute;
-  inset: 0;
+/* Both faces anchor to the same edge and the right one *shifts*. Pairing
+   left:0 on one with right:0 on the other looks symmetric but is fragile:
+   width:200% plus both edges over-constrains the box, and whichever edge wins
+   silently flips which side of the phrase you see. A transform can't be
+   over-constrained, so this can only mean one thing. */
+.slip-half-right .slip-face {
+  transform: translateX(-50%); /* -50% of the face = exactly one half-slip */
+}
+
+/* Shared painted paper — appearance only, no positioning. It used to carry
+   `position:absolute; inset:0`, which quietly set left:0 on both slip halves;
+   combined with width:200% that over-constrains the box, left wins, and both
+   halves rendered the same (left) portion of the phrase side by side. */
+.paper-surface {
   /* fixed parchment tone, deliberately NOT var(--card-bg) — real paper
      doesn't turn navy blue just because the app is in dark mode */
   background-color: #ece2c8;
@@ -587,17 +649,41 @@ input:focus,
   filter: drop-shadow(0 10px 20px rgba(0, 0, 0, 0.35));
 }
 
+/* The reverse of the sheet: same paper, seen from behind and in the fold's
+   shadow. Darkened with a filter rather than by overriding background-color and
+   background-image — those replace the whole crumple stack from .paper-surface
+   and leave a flat tan rectangle with no texture at all. */
+.paper-surface-blank {
+  filter: brightness(0.84) saturate(0.88) drop-shadow(0 6px 14px rgba(0, 0, 0, 0.35));
+}
+
+/* the paper bends away from the crease, so it catches less light there */
+.paper-surface-blank::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to left, rgba(70, 52, 20, 0.3), rgba(70, 52, 20, 0.06) 30%, transparent 62%);
+}
+
+/* A fold is straight; a torn edge is not. The back shows the *other* half of
+   the sheet so the torn edge lands on the outside and the crease side is the
+   clean overflow cut. Without this the ragged edge sits on the fold, which is
+   the one edge that cannot be ragged. */
+.slip-clip-back .slip-face {
+  transform: none;
+}
+
 .paper-slip-crease {
   position: absolute;
-  top: 6%;
-  bottom: 6%;
+  top: 8%;
+  bottom: 8%;
   left: 50%;
-  width: 4px;
+  width: 2px;
   transform: translateX(-50%);
-  background: rgba(70, 50, 20, 0.4);
-  box-shadow:
-    -2px 0 4px rgba(70, 50, 20, 0.25),
-    2px 0 4px rgba(255, 255, 255, 0.15);
+  pointer-events: none;
+  /* a healed fold line, not a gap: darker on one side, catching light on the
+     other, the way a crease actually looks once the paper is flat again */
+  background: linear-gradient(to right, rgba(70, 50, 20, 0.22), rgba(255, 250, 235, 0.35));
 }
 
 /* CSS-driven, not React-state-driven — see .score-flash above for why: a
@@ -1569,4 +1655,169 @@ input:focus,
 
 .lobby-end-room {
   margin-top: 0.5rem;
+}
+
+/* ── writing on slips ──────────────────────────────────────────────────────
+   A slip you write on rather than a form field: the painted paper sits behind
+   a transparent input, so the ink lands on the paper itself. */
+.write-slip {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  min-height: 56px;
+  display: flex;
+  align-items: center;
+}
+
+/* the written phrase once the input is gone, same ink as the live field */
+.write-slip-static {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  text-align: center;
+  color: #2c2213;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.write-slip-paper {
+  position: absolute;
+  inset: 0;
+  /* the reveal's slip is a tall card; these are short strips of the same stock */
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    100% 100%,
+    110px 110px;
+  filter: drop-shadow(0 3px 6px rgba(0, 0, 0, 0.25));
+}
+
+.write-slip-input {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  border: none;
+  background: transparent;
+  /* same fixed ink as the reveal — the paper is a fixed light tone in both
+     themes, so the writing has to be too */
+  color: #2c2213;
+  font-size: 1.05rem;
+  font-weight: 600;
+  text-align: center;
+  padding: 0.85rem 1.1rem;
+}
+
+.write-slip-input::placeholder {
+  color: rgba(70, 55, 25, 0.42);
+  font-weight: 500;
+}
+
+.write-slip-input:focus {
+  outline: none;
+  box-shadow: none;
+}
+
+/* focus lands on the paper, not a blue ring around a rectangle */
+.write-slip:focus-within .write-slip-paper {
+  filter: drop-shadow(0 0 0 2px color-mix(in srgb, var(--accent) 55%, transparent))
+    drop-shadow(0 4px 10px rgba(0, 0, 0, 0.3));
+}
+
+/* ── folding them into the box ─────────────────────────────────────────── */
+/* the reveal's slip at strip scale — same halves, same hinge, no card-sized
+   minimum height or padding */
+.slip-compact {
+  min-height: 0;
+  height: 100%;
+  max-width: none;
+}
+
+.slip-compact .slip-face {
+  padding: 0 0.6rem;
+}
+
+.foldaway-text {
+  color: #2c2213;
+  font-size: 0.9rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* the dice buttons are unmounted while folding, so the rows span the full
+   column and plain centring lines the box up with them */
+.foldaway-box {
+  position: relative;
+  align-self: center;
+  width: min(260px, 70%);
+  margin-top: 1rem;
+  height: 74px;
+  border-radius: 6px 6px 10px 10px;
+  background: linear-gradient(#8a6a44, #6d5232);
+  box-shadow:
+    inset 0 8px 14px rgba(0, 0, 0, 0.45),
+    0 8px 18px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+/* the near edge, so slips read as dropping *into* it rather than onto it */
+.foldaway-box-lip {
+  position: absolute;
+  top: -5px;
+  left: -6px;
+  right: -6px;
+  height: 14px;
+  border-radius: 4px;
+  background: linear-gradient(#a5814f, #8a6a44);
+}
+
+.foldaway-box-label {
+  position: relative;
+  padding-bottom: 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 244, 220, 0.75);
+}
+
+/* ── the sheet being cut into slips ──────────────────────────────────────
+   Laid out as the finished slips already stacked edge to edge, so the cut is
+   the gaps opening between them and the strips land exactly where the writing
+   rows appear. */
+.papercut {
+  position: relative;
+  width: 100%;
+}
+
+.papercut-sheet {
+  position: relative;
+  width: 100%;
+  /* one sheet: the strips are its slices, so the shadow belongs out here */
+  filter: drop-shadow(0 6px 16px rgba(0, 0, 0, 0.4));
+}
+
+.papercut-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+}
+
+/* the blade — a bright travelling line, strips parting just behind it */
+.papercut-blade {
+  position: absolute;
+  left: -4%;
+  right: -4%;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(to right, transparent, rgba(255, 252, 240, 0.95), transparent);
+  box-shadow: 0 0 10px rgba(255, 250, 230, 0.75);
 }

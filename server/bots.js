@@ -9,6 +9,7 @@
 // server) would mean branching every one of those paths.
 import { randomUUID } from 'node:crypto';
 import { createBot } from './bot.js';
+import * as rooms from './rooms.js';
 
 /** Total players a room will hold once bots are in the mix. Bots are cheap but
  *  each is a live socket, and a 12-player game is already very long. */
@@ -18,9 +19,23 @@ export const MAX_BOTS_PER_CALL = 6;
 const byRoom = new Map(); // roomCode -> Set<{ socket, getId }>
 const pendingTokens = new Map(); // roomCode -> Set<token>
 
+// Real names, so the roster reads like a table of people rather than a serial
+// number list — the prefix is what marks them as bots, not the name itself.
+const BOT_NAMES = [
+  'Ada', 'Bruno', 'Cleo', 'Dev', 'Esme', 'Femi', 'Gus', 'Hana',
+  'Ivo', 'Jill', 'Kofi', 'Lena', 'Milo', 'Nadia', 'Omar', 'Pia',
+  'Quinn', 'Rosa', 'Sami', 'Tariq', 'Uma', 'Vik', 'Wren', 'Zaid',
+];
+
 function nextBotName(taken) {
+  const free = BOT_NAMES.filter((n) => !taken.has(`${rooms.BOT_NAME_PREFIX}${n}`));
+  if (free.length > 0) {
+    const pick = free[Math.floor(Math.random() * free.length)];
+    return `${rooms.BOT_NAME_PREFIX}${pick}`;
+  }
+  // more bots than names: fall back to numbers rather than refusing
   for (let i = 1; ; i++) {
-    const name = `Bot ${i}`;
+    const name = `${rooms.BOT_NAME_PREFIX}Bot ${i}`;
     if (!taken.has(name)) return name;
   }
 }
@@ -81,6 +96,22 @@ export function removeBots(room) {
 export function forgetRoom(roomCode) {
   byRoom.delete(roomCode);
   pendingTokens.delete(roomCode);
+}
+
+/**
+ * Bots live in *this* process, so a restart kills them — but the room is
+ * reloaded from disk with the bot *players* still in it. Those are ghosts: no
+ * socket, no process, and nothing that will ever reconnect them. Left alone
+ * they sit at the table permanently disconnected, which is worse than merely
+ * untidy — the turn rotation skips them, they can't be handed a turn, and a
+ * team made entirely of them counts as having nobody in it.
+ *
+ * Returns how many were cleared, so boot can log it.
+ */
+export function dropOrphanedBots(room) {
+  const ghosts = [...room.players.values()].filter((p) => p.isBot);
+  for (const ghost of ghosts) rooms.removePlayer(room, ghost.id);
+  return ghosts.length;
 }
 
 /** Teardown hook: close every bot socket this process owns. Without it a test

@@ -81,3 +81,7 @@ export const ROUND_ICONS: Record<string, string> = {
 export const TEAM_LABELS: Record<Team, string> = { A: 'Blue', B: 'Red' };
 export const TEAM_CLASS: Record<Team, string> = { A: 'team-blue', B: 'team-red' };
 export const TEAM_BG_CLASS: Record<Team, string> = { A: 'team-blue-bg', B: 'team-red-bg' };
+
+/** Mirrors server/rooms.js — the server is authoritative, this is just so the
+ *  UI can say so before making a round trip. */
+export const BOT_NAME_PREFIX = '[🤖] ';
