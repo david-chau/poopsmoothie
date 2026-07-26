@@ -3,3 +3,4 @@ client/dist/
 data/rooms/
 *.log
 .DS_Store
+docs/media/*.webm

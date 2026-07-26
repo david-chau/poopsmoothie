@@ -6,6 +6,17 @@ the clock using the *same* slips each round — Taboo, Charades, Password.
 Real-time multiplayer over LAN, single Docker container, room-code lobbies.
 No cloud, no accounts — everyone just opens a link on the same wifi.
 
+| A sheet becomes slips | You write on them | Fold them into the box |
+|---|---|---|
+| ![Cutting the sheet into slips](docs/media/cut.gif) | ![Writing on the slips](docs/media/writing.gif) | ![Folding them into the box](docs/media/submit.gif) |
+
+| Your turn | The table fills up |
+|---|---|
+| ![Unfolding a slip and guessing](docs/media/turn.gif) | ![The lobby, with bots](docs/media/lobby.gif) |
+
+<sub>All recorded automatically — `npm run record` drives a real browser through a
+whole game while bots play the other seats. See [Recording the GIFs](#recording-the-gifs).</sub>
+
 ## Quick start — game night on your wifi
 
 **Pick one machine to be the host** — anything that can run Docker and stays
@@ -223,6 +234,35 @@ npm run test:e2e     # full Docker e2e (slow; builds + runs the image)
   drawer rejoins + resumes). Isolated image/container/port + a temp data dir,
   so it never touches a running stack or your real `./data`. Skips cleanly if
   Docker isn't installed.
+
+### Recording the GIFs
+
+```sh
+npm run record        # -> docs/media/*.gif
+```
+
+Drives a real browser as the host while three bots fill the table and play
+their own turns, so a whole game records with no human input. It runs its own
+server on port 4398 with a throwaway data dir, so it never touches a running
+dev server or your real `./data`.
+
+Uses the **system Chrome** (`channel: 'chrome'`) rather than downloading one, so
+`playwright` is a small devDependency. Video capture needs Playwright's own
+bundled ffmpeg once (`npx playwright install ffmpeg`, ~1MB), and the GIF step
+needs `ffmpeg` on PATH — without it the `.webm` is still written.
+
+The script marks when each scene starts and slices the recording at those
+marks, so the clips follow the animations rather than hard-coded timestamps
+that would drift. Two things worth knowing if you change it:
+
+- Playwright's webm carries irregular timestamps and **cannot be seeked
+  accurately** — slicing it directly yielded clips of entirely the wrong scene.
+  It's re-encoded to a constant frame rate first.
+- GIFs are built in two ffmpeg passes (`palettegen` then `paletteuse`). A
+  single pass quantises to a generic palette and visibly bands the paper.
+
+Tune `FPS` and `WIDTH` at the top of `scripts/record.mjs` if the files are too
+heavy; they're ~0.4–1.5MB each at the current settings.
 
 ### Testing with fewer devices than players
 

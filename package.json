@@ -15,7 +15,8 @@
     "test:client": "npm --prefix client run test",
     "test:all": "npm test && npm run test:client",
     "test:e2e": "node --test --test-timeout=300000 scripts/e2e.mjs",
-    "bots": "node scripts/dev-bots.mjs"
+    "bots": "node scripts/dev-bots.mjs",
+    "record": "npm run build:client && node scripts/record.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
@@ -23,6 +24,7 @@
     "socket.io-client": "^4.8.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.9"
+    "nodemon": "^3.1.9",
+    "playwright": "^1.62.0"
   }
 }
