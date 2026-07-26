@@ -1,8 +1,8 @@
 import { useGame } from '../GameContext';
-import { playerName, playerTeamClass } from '../lib';
-import { TEAM_LABELS, ROUND_LABELS, ROUND_ICONS, type Team, type Slip, type GameState } from '../types';
+import { emitAck } from '../socket';
+import { recordedName } from '../lib';
+import { TEAM_LABELS, TEAM_CLASS, ROUND_LABELS, ROUND_ICONS, type Team, type Slip, type GameState } from '../types';
 import Confetti from '../components/Confetti';
-import PlayerName from '../components/PlayerName';
 
 function ScoredByCell({ scoredBy, state }: { scoredBy?: Slip['scoredBy']; state: GameState }) {
   return (
@@ -13,11 +13,14 @@ function ScoredByCell({ scoredBy, state }: { scoredBy?: Slip['scoredBy']; state:
           <div
             key={round}
             className="scored-by-row"
-            title={`${ROUND_LABELS[`ROUND${round}`]}${hit ? `: ${playerName(state, hit.playerId)}` : ': not guessed'}`}
+            title={`${ROUND_LABELS[`ROUND${round}`]}${
+              hit ? `: ${recordedName(state, hit.playerId, hit.playerName)}` : ': not guessed'
+            }`}
           >
             <span className="scored-by-round">{ROUND_ICONS[`ROUND${round}`]}</span>
             {hit ? (
-              <span className={playerTeamClass(state, hit.playerId)}>{playerName(state, hit.playerId)}</span>
+              // team comes off the record too, so a departed player keeps their colour
+              <span className={TEAM_CLASS[hit.team]}>{recordedName(state, hit.playerId, hit.playerName)}</span>
             ) : (
               <span className="scored-by-empty">—</span>
             )}
@@ -28,23 +31,27 @@ function ScoredByCell({ scoredBy, state }: { scoredBy?: Slip['scoredBy']; state:
   );
 }
 
-function teamMvp(state: GameState, team: Team): { playerId: string; count: number } | null {
-  const counts = new Map<string, number>();
+function teamMvp(state: GameState, team: Team): { name: string; count: number } | null {
+  // keyed by id, but the name is carried alongside so someone who has since
+  // left the room is still named rather than shown as "someone"
+  const tally = new Map<string, { name: string; count: number }>();
   for (const slip of state.pool ?? []) {
     for (const s of slip.scoredBy ?? []) {
       if (s.team !== team) continue;
-      counts.set(s.playerId, (counts.get(s.playerId) ?? 0) + 1);
+      const seen = tally.get(s.playerId);
+      const name = recordedName(state, s.playerId, s.playerName);
+      tally.set(s.playerId, { name, count: (seen?.count ?? 0) + 1 });
     }
   }
-  let best: { playerId: string; count: number } | null = null;
-  for (const [playerId, count] of counts) {
-    if (!best || count > best.count) best = { playerId, count };
+  let best: { name: string; count: number } | null = null;
+  for (const entry of tally.values()) {
+    if (!best || entry.count > best.count) best = entry;
   }
   return best;
 }
 
 export default function Scores() {
-  const { state, leaveToLanding } = useGame();
+  const { state, leaveToLanding, isHost } = useGame();
   if (!state) return null;
 
   const winner: Team | 'tie' =
@@ -68,7 +75,7 @@ export default function Scores() {
           <p className="big-score team-blue">{state.teamScores.A}</p>
           {mvpA && (
             <p className="mvp-line">
-              ⭐ MVP: <PlayerName state={state} playerId={mvpA.playerId} /> ({mvpA.count})
+              ⭐ MVP: <span className={TEAM_CLASS.A}>{mvpA.name}</span> ({mvpA.count})
             </p>
           )}
         </div>
@@ -81,7 +88,7 @@ export default function Scores() {
           <p className="big-score team-red">{state.teamScores.B}</p>
           {mvpB && (
             <p className="mvp-line">
-              ⭐ MVP: <PlayerName state={state} playerId={mvpB.playerId} /> ({mvpB.count})
+              ⭐ MVP: <span className={TEAM_CLASS.B}>{mvpB.name}</span> ({mvpB.count})
             </p>
           )}
         </div>
@@ -129,7 +136,7 @@ export default function Scores() {
                   <tr key={slip.id}>
                     <td className="pool-table-word">{slip.text}</td>
                     <td>
-                      <PlayerName state={state} playerId={slip.authorId} />
+                      {recordedName(state, slip.authorId, slip.authorName)}
                     </td>
                     <td>
                       <ScoredByCell scoredBy={slip.scoredBy} state={state} />
@@ -142,9 +149,18 @@ export default function Scores() {
         </div>
       )}
 
-      <button className="btn btn-bottom" onClick={leaveToLanding}>
-        Leave room
-      </button>
+      {/* pinned rather than sitting at the end of a long scroll — after a game
+          people want out (or another one) without scrolling past every slip */}
+      <div className="scores-actions">
+        {isHost && (
+          <button className="btn btn-primary" onClick={() => emitAck('play-again')}>
+            🔁 Play again — same people
+          </button>
+        )}
+        <button className="btn" onClick={leaveToLanding}>
+          Leave room
+        </button>
+      </div>
     </div>
   );
 }

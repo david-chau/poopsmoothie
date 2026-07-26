@@ -6,8 +6,11 @@ import Lobby from './screens/Lobby';
 import Writing from './screens/Writing';
 import Turn from './screens/Turn';
 import Scores from './screens/Scores';
+import RoundIntermission from './screens/RoundIntermission';
 import MyNameBadge from './components/MyNameBadge';
 import Toast from './components/Toast';
+import SoundToggle from './components/SoundToggle';
+import GameSounds from './components/GameSounds';
 
 export default function App() {
   const { state, identity } = useGame();
@@ -29,7 +32,10 @@ export default function App() {
       case 'ROUND1':
       case 'ROUND2':
       case 'ROUND3':
-        screen = <Turn />;
+        // a real screen swap, not an overlay: while the gate is shut there is
+        // no turn to interact with, so Turn must not be mounted at all
+        screen = state.round.awaitingReady ? <RoundIntermission /> : <Turn />;
+        if (state.round.awaitingReady) screenKey = `${state.phase}-ready`;
         break;
       case 'SCORES':
         screen = <Scores />;
@@ -43,9 +49,13 @@ export default function App() {
   return (
     <div className="app-shell">
       <Toast />
-      {/* outside AnimatePresence on purpose: identity is shell chrome, it
-          shouldn't slide out and back in on every phase change */}
-      <MyNameBadge />
+      <GameSounds />
+      {/* outside AnimatePresence on purpose: shell chrome shouldn't slide out
+          and back in on every phase change */}
+      <div className="shell-chrome">
+        <MyNameBadge />
+        <SoundToggle />
+      </div>
       {/* Sequential slide, not an overlapping crossfade: screens vary wildly in
           height (Landing vs a long scrollable Scores list), so the old screen
           fully exits left before the new one enters from the right — a clean

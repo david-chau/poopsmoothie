@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { emitAck } from '../socket';
+import { primeAudio, submitted } from '../alert';
 import RulesDialog from '../components/RulesDialog';
 
 export default function Writing() {
@@ -28,11 +29,13 @@ export default function Writing() {
   }
 
   async function submit() {
+    primeAudio(); // user gesture: unlock audio here so the round sounds work later
     setBusy(true);
     setError(null);
     const res = await emitAck<{ ok: boolean; error?: string }>('submit-words', { words: values });
     setBusy(false);
     setError(res.ok ? null : (res.error ?? 'could not submit'));
+    if (res.ok) submitted();
   }
 
   async function forceStart() {

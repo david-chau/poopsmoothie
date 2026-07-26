@@ -113,11 +113,45 @@ Beyond the Quick start walkthrough above, good to know while hosting:
   - **Skip stuck drawer** (AFK/dropped — same team, next player) / **Force
     pass to other team** (ends the turn outright, hands it over)
   - **Pause game** for a real-world interruption; host or drawer resumes
-  - **Revert last correct word** if something got scored by mistake, plus
-    manual ±1 per team for anything revert can't reach
+  - **Revert last correct word** if something got scored by mistake
+  - **Who guessed what** — a word × round table for re-attributing any
+    already-guessed slip. Team scores are derived from it, so there's no way
+    to nudge a score away from what actually happened
   - **Hand this turn to someone else** when the wrong person went
+- **End room for everyone** (host-only): in the lobby settings, and under
+  **⚙️ Admin controls → Danger zone** once the game is running. *Leave room*
+  only removes you and leaves everyone else in a lobby you've abandoned.
+- **Kick a player** (host-only): from the lobby roster, or **⚙️ Admin controls
+  → Remove a player** once the game is running. They're sent back to the home
+  screen with a reason; if it was their turn, it passes on rather than
+  stranding the round.
 - **Reconnect is automatic.** Dropped signal or a reloaded tab picks back up
-  in the same room — same team, same turn, current word in hand.
+  in the same room — same team, same turn, current word in hand. If the device
+  lost its saved session entirely (cleared storage, flat battery, borrowed
+  phone), just rejoin the room with **the same name** — a disconnected slot is
+  handed back with its team and score intact, even if hot join is off. Only
+  slots that are actually disconnected can be reclaimed, so this can't boot a
+  player who's still connected.
+- **Between rounds** the next round is held shut until everyone taps **I'm
+  ready**, on a screen showing the round that just finished and the running
+  total. The host can **Start the round now** to skip the wait, and the gate
+  re-opens by itself if someone drops out mid-recap. There's no gate into the
+  final scores — that screen is the recap. (This used to be a modal over a live
+  round, which meant the next drawer could start their turn while everyone else
+  was still reading.)
+- **Guessed this round** is listed for everyone during play, with who got each
+  one. Scoped to the current round on purpose: the pile resets each round and
+  remembering the earlier rounds' words is the game.
+- **Sound.** Correct guesses, passes, submitting your words, someone joining,
+  the last 10 seconds of a turn (soft, firming up for the last 3), time-up,
+  each round closing, and a fanfare on the final scores. Room-wide moments play off the broadcast state,
+  so *everyone* hears a correct guess, not just the drawer who tapped it.
+  The 🔊/🔇 toggle in the top-right silences sound **and** vibration, per
+  device, and is remembered.
+- **Play again** (host-only, on the final scores): reopens the lobby around the
+  same people with the same settings — same room code, nobody rejoins, scores
+  reset. Leave/Play again stay pinned to the bottom of that screen rather than
+  below a long scroll.
 - **Crash recovery.** If the container restarts mid-game (power blip,
   redeploy), it reloads paused; the active drawer just taps **Resume**.
 
@@ -174,7 +208,9 @@ Bots write their own words and play their own turns (random correct/pass with a
 short delay), so you can hit the 4-player minimum with 1-2 real devices.
 
 **From the UI** (host-only, lobby): **🤖 +1** / **🤖 Fill to 4** / **Remove
-bots**. Best for a demo — no terminal needed.
+bots**. Best for a demo — no terminal needed. Bots write real phrases by asking
+for suggestions through the same `suggest-words` event the 🎲 buttons use, so
+their words are playable and de-duplicated against everyone else's.
 
 **From the CLI**, against any running server:
 
@@ -340,18 +376,43 @@ client/src/
   GameContext.tsx   socket connection, rejoin, clock-skew offset, game state
   socket.ts         socket.io client singleton + identity persistence
   types.ts          shared types, team/round label+color/icon maps
-  screens/          Landing, Lobby, Writing, Turn, Scores
+  screens/          Landing, Lobby, Writing, Turn, RoundIntermission, Scores
+  alert.ts          all game sounds + vibration (Web Audio, no asset shipped)
   components/       PaperSlip (fold animation), Confetti, RulesDialog,
-                    PlayerName, MyNameBadge, AdminDrawer
+                    PlayerName, MyNameBadge, AdminDrawer, Toast,
+                    SoundToggle, GameSounds
 ```
 
 **No room passwords, deliberately.** Rooms are listed openly on the landing
 screen and anyone who can reach the server can join one. That's the right trade
 for the target: a LAN game where everyone is in the same living room, and the
-alternative is reading a code out loud to people sitting next to you. The
-security boundary is the network, not the app — don't expose this to the public
-internet as-is. If you ever host it publicly, room passwords (and rate limiting
-on room creation and bot spawning) become the first thing to add.
+alternative is reading a code out loud to people sitting next to you. Reclaiming
+a slot by name follows the same logic — it's weak proof of identity, but no
+weaker than the rest of the model. **The security boundary is the network, not
+the app** — don't expose this to the public internet as-is. If you ever host it
+publicly, room passwords are the first thing to add.
+
+**Not built, because the LAN assumption removes the need.** Worth revisiting
+only if this is ever hosted publicly:
+- **Spectator mode** — everyone is in the same living room watching the same
+  drawer, so a watch-only seat adds nothing. Over the internet it would be the
+  natural way to let extra people follow along without joining a team.
+- **Room passwords / invite-only rooms** — see above.
+- **Per-room word packs** — a shared theme ("films only", "inside jokes") is
+  fun but the 🎲 suggestions plus everyone writing their own already covers it.
+
+What *is* hardened, because these bite even on a friendly LAN:
+- Every socket handler is wrapped so a malformed payload can't throw out of the
+  handler. Without it, one bad message (`join-room` with a non-string code, or
+  a literal `null` payload) became an uncaughtException and killed the server
+  for every room on the box.
+- Rejoin secrets are stored **hashed** (sha256, constant-time compare), so a
+  room file on the NAS can't be read to impersonate a player. Old files with
+  plaintext secrets migrate themselves on first load.
+- Room creation is rate-limited per socket and capped globally, so a loop can't
+  fill the disk with room files.
+- Config values are clamped with a NaN guard — `wordsPerPlayer: NaN` used to
+  make a room permanently unable to start, with no UI to recover.
 
 **Design notes worth knowing before touching this again:**
 - Server is fully authoritative; client never computes game logic, only

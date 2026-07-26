@@ -14,8 +14,11 @@ export interface Slip {
   id: string;
   text: string;
   authorId: string;
+  /** captured when the pool was built — players who leave are removed from the
+   *  roster, and the recap would otherwise credit their words to "someone" */
+  authorName?: string | null;
   /** who scored it, per round (same slip is reused every round) */
-  scoredBy?: { round: number; team: Team; playerId: string }[];
+  scoredBy?: { round: number; team: Team; playerId: string; playerName?: string | null }[];
 }
 
 export interface RoundPublic {
@@ -27,6 +30,12 @@ export interface RoundPublic {
   turnEndsAt: number | null;
   paused: boolean;
   pauseReason: string | null;
+  /** rounds 2 and 3 open behind a ready gate */
+  awaitingReady: boolean;
+  readyPlayerIds: string[];
+  /** guessed so far *this round* — resets each round, since remembering the
+   *  earlier rounds' words is the game */
+  guessedThisRound: { id: string; text: string; playerName: string | null; team: Team | null }[];
 }
 
 /** Mirrors server events.js `publicState()`. Never carries slip text

@@ -95,14 +95,20 @@ export function GameProvider({ children }: { children: ReactNode }) {
   }
 
   async function joinRoom(roomCode: string, name: string) {
-    const res = await emitAck<{ ok: boolean; error?: string; roomCode: string; playerId: string; secret: string }>(
-      'join-room',
-      { roomCode, name },
-    );
+    const res = await emitAck<{
+      ok: boolean;
+      error?: string;
+      roomCode: string;
+      playerId: string;
+      secret: string;
+      reclaimed?: boolean;
+    }>('join-room', { roomCode, name });
     if (res.ok) {
       const id = { roomCode: res.roomCode, playerId: res.playerId, secret: res.secret };
       saveIdentity(id);
       setIdentity(id);
+      // say so, or picking up someone else's team and score looks like a bug
+      if (res.reclaimed) setNotice('Welcome back — you picked up where you left off.');
     }
     return res;
   }

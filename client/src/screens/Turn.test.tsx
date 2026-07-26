@@ -23,6 +23,9 @@ function drawerTurn(phase: Phase) {
       turnEndsAt: Date.now() + 60_000,
       paused: false,
       pauseReason: null,
+      awaitingReady: false,
+      readyPlayerIds: [],
+      guessedThisRound: [],
     },
   });
   mockUseGame.mockReturnValue({
@@ -56,4 +59,39 @@ test('renders the round label with team-colored score line', () => {
   expect(screen.getByText(/Round 1: Taboo/)).toBeInTheDocument();
   expect(screen.getByText(/Team Blue: 0/)).toBeInTheDocument();
   expect(screen.getByText(/Team Red: 0/)).toBeInTheDocument();
+});
+
+test('shows what has been guessed this round, newest first, with who got it', () => {
+  const state = makeState({
+    phase: 'ROUND1',
+    round: {
+      number: 1,
+      remainingCount: 2,
+      guessedCount: 2,
+      drawerId: 'p2', // someone else is drawing, so we are a watcher
+      turnId: 't1',
+      turnEndsAt: Date.now() + 60_000,
+      paused: false,
+      pauseReason: null,
+      awaitingReady: false,
+      readyPlayerIds: [],
+      guessedThisRound: [
+        { id: 's1', text: 'banana', playerName: 'Alice', team: 'A' },
+        { id: 's2', text: 'thunder', playerName: 'Bob', team: 'B' },
+      ],
+    },
+  });
+  mockUseGame.mockReturnValue({ state, mySlip: null, isDrawer: false, isHost: false, clockOffsetMs: 0 });
+  render(<Turn />);
+
+  expect(screen.getByText('Guessed this round')).toBeInTheDocument();
+  const words = screen.getAllByText(/banana|thunder/).map((n) => n.textContent);
+  expect(words).toEqual(['thunder', 'banana']); // most recent first
+  expect(screen.getByText('Alice')).toBeInTheDocument();
+});
+
+test('the guessed list stays out of the way before anything is guessed', () => {
+  drawerTurn('ROUND1');
+  render(<Turn />);
+  expect(screen.queryByText('Guessed this round')).not.toBeInTheDocument();
 });

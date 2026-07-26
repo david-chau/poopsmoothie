@@ -118,3 +118,27 @@ test('destroyRoom evicts from the shared Map', () => {
   rooms.destroyRoom(room.code);
   assert.equal(rooms.getRoom(room.code), undefined);
 });
+
+test('secrets are stored hashed, never in plaintext', () => {
+  const room = rooms.newRoom();
+  const player = rooms.addPlayer(room, 'Al');
+  const stored = room.players.get(player.id);
+
+  assert.ok(player.secret, 'caller gets the raw secret once');
+  assert.ok(stored.secretHash, 'only the hash is kept');
+  assert.notEqual(stored.secretHash, player.secret);
+  // the whole point: a room file on disk must not contain the raw secret
+  assert.equal(JSON.parse(JSON.stringify(stored)).secret, undefined);
+  assert.equal(Object.keys(stored).includes('secret'), false);
+
+  assert.ok(rooms.findPlayerBySecret(room, player.id, player.secret));
+  assert.equal(rooms.findPlayerBySecret(room, player.id, 'wrong'), null);
+  assert.equal(rooms.findPlayerBySecret(room, player.id, undefined), null);
+  assert.equal(rooms.findPlayerBySecret(room, player.id, stored.secretHash), null); // hash isn't a password
+});
+
+test('getRoom tolerates any JSON type a client can send', () => {
+  for (const bad of [{}, [], 42, null, undefined, true]) {
+    assert.equal(rooms.getRoom(bad), undefined);
+  }
+});

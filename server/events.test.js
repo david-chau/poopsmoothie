@@ -10,6 +10,7 @@ import { io as ioClient } from 'socket.io-client';
 // isolate persistence to a temp dir before events.js (-> persist.js) loads
 process.env.DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'ps-events-'));
 const { registerSocketHandlers } = await import('./events.js');
+const bots = await import('./bots.js');
 
 let httpServer;
 let io;
@@ -22,10 +23,12 @@ before(async () => {
   io.on('connection', (socket) => registerSocketHandlers(io, socket));
   await new Promise((r) => httpServer.listen(0, r));
   url = `http://localhost:${httpServer.address().port}`;
+  process.env.SELF_URL = url; // host-spawned bots dial back in here, not :4321
 });
 
 after(() => {
   clients.forEach((c) => c.disconnect());
+  bots.removeAllBots(); // host-spawned bots aren't in `clients`; their sockets hang the run
   io.close();
   httpServer.close();
 });
@@ -39,6 +42,16 @@ function connect() {
 }
 const ack = (c, event, payload) => new Promise((r) => c.emit(event, payload ?? {}, r));
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** poll until predicate() is true, or fail loudly rather than hanging */
+async function until(predicate, timeoutMs = 5000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await wait(25);
+  }
+  throw new Error('timed out waiting for a condition');
+}
 
 function latestStateOf(c) {
   let state = null;
@@ -383,4 +396,311 @@ test('a blank or whitespace-only name falls back instead of rendering empty', as
   await ack(c, 'create-room', { name: '   ' });
   await wait(50);
   assert.equal(getState().players[0].name, 'Player');
+});
+
+test('room creation is capped per socket so one client cannot flood the disk', async () => {
+  const c = await connect();
+  const results = [];
+  for (let i = 0; i < 10; i++) results.push(await ack(c, 'create-room', { name: 'spam' }));
+  const made = results.filter((r) => r.ok).length;
+  assert.ok(made > 0 && made < 10, `expected a burst then a stop, got ${made}/10`);
+  assert.match(results.at(-1).error, /slow down/);
+});
+
+test('suggest-words caps a large exclude list instead of chewing on it', async () => {
+  const c = await connect();
+  const create = await ack(c, 'create-room', { name: 'H' });
+  for (const n of ['B', 'C', 'D']) {
+    const j = await connect();
+    await ack(j, 'join-room', { roomCode: create.roomCode, name: n });
+  }
+  await ack(c, 'set-config', { wordsPerPlayer: 1 });
+  await ack(c, 'start-game');
+
+  // stays under socket.io's 1MB maxHttpBufferSize, which already rejects
+  // anything truly enormous before it reaches us — this covers the rest
+  const started = Date.now();
+  const res = await ack(c, 'suggest-words', { count: 3, exclude: new Array(20000).fill('filler') });
+  assert.equal(res.ok, true);
+  assert.equal(res.words.length, 3);
+  assert.ok(Date.now() - started < 1000, 'must not scale with the caller-supplied array');
+});
+
+test('kick-player: host only, cannot self-kick, and the target is told why', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  const guest = await connect();
+  const joined = await ack(guest, 'join-room', { roomCode: create.roomCode, name: 'Pest' });
+  await wait(50);
+
+  assert.equal((await ack(guest, 'kick-player', { playerId: create.playerId })).ok, false); // not host
+  assert.equal((await ack(host, 'kick-player', { playerId: create.playerId })).ok, false); // no self-kick
+  assert.equal((await ack(host, 'kick-player', { playerId: 'ghost' })).ok, false);
+
+  const told = new Promise((r) => guest.once('room-closed', r));
+  assert.equal((await ack(host, 'kick-player', { playerId: joined.playerId })).ok, true);
+  assert.match((await told).reason, /removed you/i);
+
+  await wait(50);
+  assert.equal(getState().players.length, 1); // slot gone, not just marked offline
+});
+
+test('kicking the current drawer passes the turn on instead of stranding it', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const hostId = getState().hostId;
+  const host = socks[getState().players.findIndex((p) => p.id === hostId)];
+  // the host opens round 1 (team A's first player), so hand the turn over
+  // before kicking — you can't kick yourself
+  await ack(host, 'force-pass-team');
+  await wait(50);
+  const drawerId = getState().round.drawerId;
+  assert.notEqual(drawerId, hostId, 'precondition: host is no longer the drawer');
+
+  assert.equal((await ack(host, 'kick-player', { playerId: drawerId })).ok, true);
+  await wait(80);
+  assert.notEqual(getState().round.drawerId, drawerId);
+  assert.ok(getState().round.drawerId, 'a new drawer took over');
+  assert.equal(getState().round.paused, false);
+});
+
+test('a player who lost their credentials reclaims their slot by name', async () => {
+  const { socks, roomCode, getState } = await fullRoomToRound1();
+  const before = getState();
+  const victim = before.players.find((p) => p.id !== before.hostId);
+  const victimSock = socks[before.players.findIndex((p) => p.id === victim.id)];
+
+  victimSock.disconnect(); // phone died; localStorage gone with it
+  await wait(80);
+  assert.equal(getState().players.find((p) => p.id === victim.id).connected, false);
+
+  // they come back and just type their name — no secret to offer
+  const returning = await connect();
+  const res = await ack(returning, 'join-room', { roomCode, name: victim.name });
+  assert.equal(res.ok, true);
+  assert.equal(res.reclaimed, true);
+  assert.equal(res.playerId, victim.id, 'same slot, not a new player');
+  assert.ok(res.secret, 'issued fresh credentials');
+
+  await wait(80);
+  const after = getState();
+  assert.equal(after.players.length, before.players.length, 'no duplicate player');
+  assert.equal(after.players.find((p) => p.id === victim.id).team, victim.team);
+  assert.equal(after.players.find((p) => p.id === victim.id).connected, true);
+});
+
+test('reclaim never steals a slot from someone still connected', async () => {
+  const host = await connect();
+  const create = await ack(host, 'create-room', { name: 'Dave' });
+  const impostor = await connect();
+  const res = await ack(impostor, 'join-room', { roomCode: create.roomCode, name: 'Dave' });
+
+  assert.equal(res.ok, true);
+  assert.notEqual(res.playerId, create.playerId, 'got a new slot, not the live one');
+  assert.notEqual(res.reclaimed, true);
+});
+
+// Every host-only event, checked from a non-host socket in one place. These
+// guards were previously untested: the underlying game logic is covered in
+// game.test.js, but deleting an isHost line broke nothing visible.
+test('every host-only event refuses a non-host', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const state = getState();
+  const nonHost = socks[state.players.findIndex((p) => p.id !== state.hostId)];
+
+  const hostOnly = [
+    ['host-pause', {}],
+    ['revert-last-guess', {}],
+    ['set-drawer', { playerId: state.hostId }],
+    ['set-slip-scorer', { slipId: 'x', round: 1, playerId: null }],
+    ['end-game', {}],
+    ['force-start-round', {}],
+    ['skip-drawer', {}],
+    ['force-pass-team', {}],
+    ['end-room', {}],
+    ['kick-player', { playerId: state.hostId }],
+    ['add-bots', { count: 1 }],
+    ['remove-bots', {}],
+    ['set-config', { turnSeconds: 30 }],
+    ['start-game', {}],
+  ];
+  for (const [event, payload] of hostOnly) {
+    const res = await ack(nonHost, event, payload);
+    assert.equal(res.ok, false, `${event} must reject a non-host`);
+    assert.match(res.error, /host only/, `${event} rejected for the wrong reason: ${res.error}`);
+  }
+
+  // the room is untouched by all that
+  assert.equal(getState().phase, 'ROUND1');
+  assert.equal(getState().players.length, 4);
+});
+
+test('end-game cannot be used before the game starts or twice', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  for (const n of ['B', 'C', 'D']) {
+    const c = await connect();
+    await ack(c, 'join-room', { roomCode: create.roomCode, name: n });
+  }
+  await wait(50);
+
+  // LOBBY -> SCORES would strand everyone on a results screen with no words
+  const early = await ack(host, 'end-game');
+  assert.equal(early.ok, false);
+  assert.match(early.error, /not started/);
+  assert.equal(getState().phase, 'LOBBY');
+
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'start-game');
+  await wait(50);
+  assert.equal((await ack(host, 'end-game')).ok, true); // from WRITING is fine
+  await wait(50);
+  assert.equal(getState().phase, 'SCORES');
+  assert.equal((await ack(host, 'end-game')).ok, false); // already over
+});
+
+test('a mid-game team switch keeps the player drawing (socket path)', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const before = getState();
+  const mover = before.players.find((p) => p.team === 'B');
+  const moverSock = socks[before.players.findIndex((p) => p.id === mover.id)];
+
+  assert.equal((await ack(moverSock, 'set-team', { targetPlayerId: mover.id, team: 'A' })).ok, true);
+  await wait(80);
+  assert.equal(getState().players.find((p) => p.id === mover.id).team, 'A');
+
+  // rotate team A until everyone on it has had a turn; the mover must appear
+  const host = socks[before.players.findIndex((p) => p.id === before.hostId)];
+  const seen = new Set();
+  for (let i = 0; i < 6; i++) {
+    await ack(host, 'skip-drawer');
+    await wait(30);
+    seen.add(getState().round.drawerId);
+  }
+  assert.ok(seen.has(mover.id), 'the switched player still gets turns');
+});
+
+/** Bots play their own turns; the human host just steps aside when it lands on
+ *  them, which is enough to let a round play itself out in a test. */
+async function letBotsPlay(host, getState, hostId, done, timeoutMs = 20000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (done()) return;
+    const s = getState();
+    if (s && !s.round.awaitingReady && s.round.drawerId === hostId && !s.round.turnEndsAt) {
+      await ack(host, 'skip-drawer');
+    }
+    await wait(50);
+  }
+  throw new Error('timed out letting the bots play');
+}
+
+test('the ready gate works over the wire, and bots ready themselves', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'add-bots', { count: 3 });
+  await until(() => getState()?.players.length === 4);
+
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['host-word'] });
+  await until(() => getState()?.phase === 'ROUND1', 8000);
+
+  // bots finish round 1 on their own, then hit the gate
+  await letBotsPlay(host, getState, create.playerId, () => getState()?.round.awaitingReady === true);
+
+  assert.equal(getState().phase, 'ROUND2');
+  assert.equal(getState().round.awaitingReady, true, 'round 2 is held shut');
+  assert.deepEqual(
+    getState().round.readyPlayerIds.sort(),
+    getState()
+      .players.filter((p) => p.isBot)
+      .map((p) => p.id)
+      .sort(),
+    'the bots readied themselves, the human has not',
+  );
+
+  await ack(host, 'player-ready');
+  await until(() => getState()?.round.awaitingReady === false, 3000);
+});
+
+test('start-round-now is host-only and opens the gate for everyone', async () => {
+  const host = await connect();
+  const getState = latestStateOf(host);
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  const guest = await connect();
+  await ack(guest, 'join-room', { roomCode: create.roomCode, name: 'Guest' });
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'add-bots', { count: 2 });
+  await until(() => getState()?.players.length === 4);
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['a'] });
+  await ack(guest, 'submit-words', { words: ['b'] });
+  await until(() => getState()?.phase === 'ROUND1', 8000);
+
+  // two humans here, so step both aside and let the bots run the round
+  const guestId = getState().players.find((p) => p.name === 'Guest').id;
+  const started = Date.now();
+  while (getState()?.round.awaitingReady !== true && Date.now() - started < 20000) {
+    const s = getState();
+    if (s && !s.round.awaitingReady && !s.round.turnEndsAt && (s.round.drawerId === create.playerId || s.round.drawerId === guestId)) {
+      await ack(host, 'skip-drawer');
+    }
+    await wait(50);
+  }
+  assert.equal(getState().round.awaitingReady, true);
+
+  assert.equal((await ack(guest, 'start-round-now')).ok, false); // not the host
+  assert.equal(getState().round.awaitingReady, true);
+  assert.equal((await ack(host, 'start-round-now')).ok, true);
+  await until(() => getState()?.round.awaitingReady === false, 3000);
+});
+
+test('everyone can see what was guessed this round, and only that', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const state = getState();
+  const drawerIdx = state.players.findIndex((p) => p.id === state.round.drawerId);
+  const watcher = latestStateOf(socks[drawerIdx === 0 ? 1 : 0]); // a non-drawer
+
+  let latest = null;
+  socks[drawerIdx].on('slip-revealed', (p) => (latest = p));
+  await ack(socks[drawerIdx], 'start-turn');
+  await wait(120);
+  // snapshot before guessing: the server sends the *next* slip straight after,
+  // which would otherwise overwrite what we are asserting about
+  const guessedText = latest.slip.text;
+  await ack(socks[drawerIdx], 'correct-guess', { slipId: latest.slip.id, turnId: getState().round.turnId });
+  await wait(120);
+
+  const seen = watcher().round.guessedThisRound;
+  assert.equal(seen.length, 1, 'a non-drawer sees the guessed word');
+  assert.equal(seen[0].text, guessedText);
+  assert.ok(seen[0].playerName, 'and who got it');
+  // the words still in the bag stay secret
+  assert.ok(watcher().round.remainingCount > 0);
+  assert.equal(JSON.stringify(watcher().round).split('"text"').length - 1, 1);
+});
+
+test('play-again is host-only and only once the game is over', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const state = getState();
+  const host = socks[state.players.findIndex((p) => p.id === state.hostId)];
+  const guest = socks[state.players.findIndex((p) => p.id !== state.hostId)];
+
+  const tooEarly = await ack(host, 'play-again');
+  assert.equal(tooEarly.ok, false);
+  assert.match(tooEarly.error, /still going/);
+
+  await ack(host, 'end-game');
+  await until(() => getState()?.phase === 'SCORES');
+
+  assert.equal((await ack(guest, 'play-again')).ok, false); // not the host
+  assert.equal((await ack(host, 'play-again')).ok, true);
+
+  await until(() => getState()?.phase === 'LOBBY');
+  assert.equal(getState().players.length, 4, 'nobody had to rejoin');
+  assert.deepEqual(getState().teamScores, { A: 0, B: 0 });
+  assert.deepEqual(getState().roundScores, []);
 });

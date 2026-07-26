@@ -1,8 +1,17 @@
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 
 // ponytail: single in-memory Map is the whole "database" — room count is
 // party-scale (a handful of rooms, a dozen players each), no need for a real store.
 export const rooms = new Map();
+
+// A party needs a handful of rooms. Without a ceiling, one socket in a loop
+// creates unlimited rooms — each one a JSON file on disk — so this is the
+// difference between "annoying" and "fills the NAS".
+export const MAX_ROOMS = 50;
+
+export function roomCount() {
+  return rooms.size;
+}
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I ambiguity
 
@@ -49,6 +58,10 @@ export function newRoom() {
       remainingMsAtPause: null,
       paused: false,
       pauseReason: null,
+      // rounds 2 and 3 open behind a ready gate so the recap isn't racing a
+      // drawer who already tapped start
+      awaitingReady: false,
+      ready: [], // playerId[]
       timeoutHandle: null,
     },
     // both derived from pool[].scoredBy by game.recomputeScores — cached here
@@ -71,6 +84,20 @@ export function destroyRoom(code) {
   rooms.delete(code);
 }
 
+/** Rejoin credentials are stored hashed, so a room file on the NAS can't be
+ *  read to impersonate players. The raw secret is handed to its owner once, at
+ *  join time, and never written down server-side. */
+export function hashSecret(secret) {
+  return createHash('sha256').update(String(secret ?? '')).digest('hex');
+}
+
+/** Constant-time compare so a wrong guess can't be narrowed by timing. */
+function secretMatches(hash, candidate) {
+  const a = Buffer.from(String(hash ?? ''), 'utf8');
+  const b = Buffer.from(hashSecret(candidate), 'utf8');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 export function addPlayer(room, name) {
   const id = randomUUID();
   const secret = randomUUID();
@@ -78,7 +105,7 @@ export function addPlayer(room, name) {
   const countB = [...room.players.values()].filter((p) => p.team === 'B').length;
   const player = {
     id,
-    secret,
+    secretHash: hashSecret(secret),
     // coerce before slicing: `{}` has no .slice, and an array's .slice would
     // quietly produce an array where a string is expected
     name: (String(name ?? '').trim() || 'Player').slice(0, 40),
@@ -88,13 +115,48 @@ export function addPlayer(room, name) {
   };
   room.players.set(id, player);
   if (!room.hostId) room.hostId = id;
+  // Raw secret rides back on the returned player so the caller can hand it to
+  // its owner, but non-enumerably: object spread and JSON.stringify both skip
+  // it, so persist.js writes only the hash. Callers still get the real player
+  // object to mutate (socketId, isBot), not a copy.
+  Object.defineProperty(player, 'secret', { value: secret, enumerable: false, configurable: true });
   return player;
 }
 
 export function findPlayerBySecret(room, playerId, secret) {
   const player = room.players.get(playerId);
-  if (!player || player.secret !== secret) return null;
+  if (!player || !secretMatches(player.secretHash, secret)) return null;
   return player;
+}
+
+/** Issue fresh credentials for an existing slot (see reclaimSlot). */
+export function resetSecret(player) {
+  const secret = randomUUID();
+  player.secretHash = hashSecret(secret);
+  return secret;
+}
+
+/**
+ * Someone whose device forgot its credentials (cleared storage, dead battery,
+ * borrowed phone) has no way back to their own slot: `rejoin` needs a secret
+ * they no longer have, and `join-room` would mint a brand-new player, losing
+ * their team and their score attribution — or be refused outright with hot
+ * join off. So a *disconnected* slot with a matching name can be reclaimed,
+ * with fresh credentials issued.
+ *
+ * Only disconnected slots, so this can never boot a player who is actively
+ * connected. Name alone is weak proof, but it is exactly as strong as the rest
+ * of this app's model: no passwords, everyone in one room, network is the
+ * boundary (see README). Returns the raw secret for the reclaimer.
+ */
+export function reclaimSlot(room, name) {
+  const wanted = String(name ?? '').trim().toLowerCase();
+  if (!wanted) return null;
+  const slot = [...room.players.values()].find((p) => !p.connected && !p.isBot && p.name.toLowerCase() === wanted);
+  if (!slot) return null;
+  const secret = resetSecret(slot); // old credential dies with the old device
+  slot.connected = true;
+  return { player: slot, secret };
 }
 
 /** Can a newcomer still get in? Always during the lobby; mid-game only when the

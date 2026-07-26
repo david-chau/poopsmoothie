@@ -38,9 +38,13 @@ export function allConnectedSubmitted(room) {
 function buildPool(room) {
   room.pool = {};
   for (const [playerId, words] of Object.entries(room.submissions)) {
+    // name captured here, not looked up at reveal time: players who leave are
+    // removed from the roster, and the end-of-game recap would credit their
+    // words to "someone"
+    const authorName = room.players.get(playerId)?.name ?? null;
     for (const text of words) {
       const id = randomUUID();
-      room.pool[id] = { id, text, authorId: playerId };
+      room.pool[id] = { id, text, authorId: playerId, authorName };
     }
   }
 }
@@ -61,6 +65,24 @@ function buildTurnOrder(room) {
 export function addLatePlayer(room, player) {
   const list = room.turnOrder?.[player.team];
   if (list && !list.includes(player.id)) list.push(player.id);
+}
+
+/** Changing team mid-game used to quietly remove you from the rotation for good:
+ *  the snapshot still had you under your old team, where nextDrawerForTeam skips
+ *  you (your `team` no longer matches), and your new team's list had never heard
+ *  of you. So move the entry to follow the player. */
+export function movePlayerInTurnOrder(room, player) {
+  if (!room.turnOrder) return;
+  for (const team of ['A', 'B']) {
+    if (team === player.team) continue;
+    const list = room.turnOrder[team];
+    const at = list.indexOf(player.id);
+    if (at !== -1) list.splice(at, 1);
+  }
+  addLatePlayer(room, player);
+  // if they were mid-turn, the turn goes with them rather than leaving the
+  // active team pointing at a side this player is no longer on
+  if (room.round.drawerId === player.id) room.activeTeam = player.team;
 }
 
 export function startWriting(room) {
@@ -175,6 +197,9 @@ function drawNextSlip(room) {
 
 /** drawer taps "ready" -> draw first slip of the turn, start the timer. */
 export function startTurn(room, playerId, onTimeout) {
+  // the gate is the whole point — without this the drawer could start behind
+  // everyone else's recap screen
+  if (room.round.awaitingReady) return { ok: false, error: 'waiting for everyone to be ready' };
   if (room.round.drawerId !== playerId) return { ok: false, error: 'not your turn' };
   if (room.round.turnEndsAt) return { ok: false, error: 'turn already running' };
   if (room.round.remaining.length === 0) return { ok: false, error: 'no slips left' };
@@ -212,7 +237,12 @@ export function correctGuess(room, playerId, slipId, turnId) {
   // each round.
   const slip = room.pool[room.round.currentSlipId];
   slip.scoredBy ??= [];
-  slip.scoredBy.push({ round: ROUND_PHASES.indexOf(room.phase) + 1, team: room.activeTeam, playerId });
+  slip.scoredBy.push({
+    round: ROUND_PHASES.indexOf(room.phase) + 1,
+    team: room.activeTeam,
+    playerId,
+    playerName: room.players.get(playerId)?.name ?? null, // survives them leaving
+  });
   recomputeScores(room);
   return afterSlipResolved(room);
 }
@@ -269,7 +299,43 @@ function finishRound(room) {
   } else {
     room.phase = ROUND_PHASES[idx + 1];
     startRound(room, { toggleTeam: true });
+    // Hold the new round until people have looked at the recap. This used to be
+    // a modal on top of a live round, which meant the next drawer could start
+    // their turn while everyone else was still reading. There is no gate into
+    // SCORES (the branch above) — the results screen is the recap.
+    room.round.awaitingReady = true;
+    room.round.ready = [];
   }
+}
+
+/** Everyone connected has said they're ready — or the host got bored. */
+function openRound(room) {
+  room.round.awaitingReady = false;
+  room.round.ready = [];
+}
+
+export function markReady(room, playerId) {
+  if (!room.round.awaitingReady) return { ok: false, error: 'the round is already under way' };
+  if (!room.round.ready.includes(playerId)) room.round.ready.push(playerId);
+  refreshReadyGate(room);
+  return { ok: true };
+}
+
+/** Host override, and the escape hatch when someone wanders off mid-recap. */
+export function startRoundNow(room) {
+  if (!room.round.awaitingReady) return { ok: false, error: 'the round is already under way' };
+  openRound(room);
+  return { ok: true };
+}
+
+/** Re-evaluate the gate after the *roster* changes, not just after a ready:
+ *  someone disconnecting or being kicked while we wait for them would otherwise
+ *  hold the whole round open forever. */
+export function refreshReadyGate(room) {
+  if (!room.round.awaitingReady) return;
+  const connected = [...room.players.values()].filter((p) => p.connected);
+  if (connected.length === 0) return; // nobody to wait for or to let in
+  if (connected.every((p) => room.round.ready.includes(p.id))) openRound(room);
 }
 
 /** Called by the caller (events.js) once it has resolved a turn-ending action
@@ -380,6 +446,37 @@ export function endGameNow(room) {
   room.phase = 'SCORES';
 }
 
+/** Same room, same people, same settings — a fresh game. Keeping the existing
+ *  room means nobody has to re-share a code or rejoin; everyone is already
+ *  here, so the lobby is simply reopened around them. */
+export function resetForRematch(room) {
+  clearTimer(room);
+  room.phase = 'LOBBY';
+  room.submissions = {};
+  room.pool = {};
+  room.teamScores = { A: 0, B: 0 };
+  room.roundScores = [];
+  room.activeTeam = 'A';
+  room.turnOrder = { A: [], B: [] }; // rebuilt at the next WRITING -> ROUND1
+  room.turnPointer = { A: 0, B: 0 };
+  room.round = {
+    ...room.round,
+    number: 0,
+    remaining: [],
+    guessed: [],
+    currentSlipId: null,
+    turnId: null,
+    drawerId: null,
+    turnEndsAt: null,
+    remainingMsAtPause: null,
+    paused: false,
+    pauseReason: null,
+    awaitingReady: false,
+    ready: [],
+    timeoutHandle: null,
+  };
+}
+
 // --- Host patch controls ----------------------------------------------------
 
 /** Undo a slip marked correct by mistake, and put it back in play. Scoped to
@@ -411,7 +508,7 @@ export function setSlipScorer(room, slipId, roundNumber, playerId) {
   if (playerId) {
     const player = room.players.get(playerId);
     if (!player) return { ok: false, error: 'player not found' };
-    slip.scoredBy.push({ round, team: player.team, playerId });
+    slip.scoredBy.push({ round, team: player.team, playerId, playerName: player.name });
   }
   recomputeScores(room);
   return { ok: true };

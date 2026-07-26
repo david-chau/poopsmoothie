@@ -21,6 +21,7 @@ export default function AdminDrawer() {
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const [handTo, setHandTo] = useState('');
+  const [kickTarget, setKickTarget] = useState('');
   const [confirmEnd, setConfirmEnd] = useState(false);
 
   if (!state) return null;
@@ -40,6 +41,13 @@ export default function AdminDrawer() {
     setNote(null);
     setConfirmEnd(false);
     ref.current?.showModal();
+  }
+
+  async function kick() {
+    const name = state!.players.find((p) => p.id === kickTarget)?.name ?? 'this player';
+    if (!window.confirm(`Remove ${name} from the room?`)) return;
+    await run('kick-player', { playerId: kickTarget }, `Removed ${name}`);
+    setKickTarget('');
   }
 
   // kills the room for everyone, so it takes two taps rather than a confirm()
@@ -168,6 +176,28 @@ export default function AdminDrawer() {
             </button>
           </div>
           <p className="admin-hint">Switches the active team to theirs; any word in hand goes back in the pile.</p>
+
+          <h3>Remove a player</h3>
+          <div className="admin-grid">
+            <select className="admin-select" value={kickTarget} onChange={(e) => setKickTarget(e.target.value)}>
+              <option value="">Choose a player…</option>
+              {state.players
+                .filter((p) => p.id !== state!.hostId)
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.isBot ? ' (bot)' : ''}
+                    {p.connected ? '' : ' — offline'}
+                  </option>
+                ))}
+            </select>
+            <button className="btn" disabled={!kickTarget} onClick={kick}>
+              Kick
+            </button>
+          </div>
+          <p className="admin-hint">
+            They&rsquo;re sent back to the home screen. If it&rsquo;s their turn, it passes to the next player.
+          </p>
 
           <h3>Danger zone</h3>
           <button className={`btn admin-wide ${confirmEnd ? 'btn-danger' : ''}`} onClick={endRoom}>

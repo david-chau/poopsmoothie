@@ -13,6 +13,14 @@ interface PaperSlipProps {
 // a fixed-duration keyframe, so the two never read as the same tempo.
 const FOLD_DURATION = 0.5;
 
+/** Slips hold phrases, not just words. CSS can't measure the string, so pick
+ *  the size band here rather than letting a long one overflow the paper. */
+function lengthClass(text: string): string {
+  if (text.length > 28) return 'paper-slip-text-xlong';
+  if (text.length > 14) return 'paper-slip-text-long';
+  return '';
+}
+
 // Paper folded along its vertical center crease: folded width is half the
 // unfolded width, and unfolding doubles it back out — like the real slips.
 // The crumple texture is a static SVG bump-map baked into .paper-slip-paper's
@@ -37,7 +45,7 @@ export default function PaperSlip({ text, slipKey, flash }: PaperSlipProps) {
             transition={{ duration: FOLD_DURATION * 0.7, delay: FOLD_DURATION * 0.3 }}
           />
           <motion.span
-            className="paper-slip-text"
+            className={`paper-slip-text ${lengthClass(text)}`}
             variants={{ folded: { opacity: 0 }, open: { opacity: 1 } }}
             transition={{ duration: FOLD_DURATION * 0.6, delay: FOLD_DURATION * 0.5 }}
           >

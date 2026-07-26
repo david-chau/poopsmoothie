@@ -509,3 +509,174 @@ test('addLatePlayer is idempotent and safe before the order exists', () => {
   game.addLatePlayer(room, p);
   assert.equal(room.turnOrder[p.team].filter((id) => id === p.id).length, 1);
 });
+
+test('switching team mid-game keeps the player in the rotation', () => {
+  const { room, players } = setup();
+  const victim = players[0]; // team A, and the opening drawer
+  assert.ok(room.turnOrder.A.includes(victim.id));
+
+  rooms.setTeam(room, victim.id, victim.id, 'B');
+  game.movePlayerInTurnOrder(room, room.players.get(victim.id));
+
+  assert.equal(room.turnOrder.A.includes(victim.id), false, 'gone from the old team');
+  assert.ok(room.turnOrder.B.includes(victim.id), 'present in the new one');
+  assert.equal(room.activeTeam, 'B', 'they were drawing, so the turn follows them');
+
+  // and they actually come up again when their new team rotates
+  const seen = new Set();
+  room.activeTeam = 'B';
+  for (let i = 0; i < room.turnOrder.B.length + 1; i++) {
+    game.skipDrawer(room);
+    seen.add(room.round.drawerId);
+  }
+  assert.ok(seen.has(victim.id));
+  stopTimer(room);
+});
+
+test('moving a player who is not drawing leaves the active team alone', () => {
+  const { room, players } = setup();
+  const bystander = players[1]; // team B, not the current drawer
+  assert.equal(room.round.drawerId, players[0].id);
+
+  rooms.setTeam(room, bystander.id, bystander.id, 'A');
+  game.movePlayerInTurnOrder(room, room.players.get(bystander.id));
+
+  assert.equal(room.activeTeam, 'A'); // unchanged from round start
+  assert.equal(room.round.drawerId, players[0].id);
+  assert.ok(room.turnOrder.A.includes(bystander.id));
+  assert.equal(room.turnOrder.B.includes(bystander.id), false);
+  stopTimer(room);
+});
+
+test('names are captured on the slip so a player who leaves is still credited', () => {
+  const { room, players } = setup(1);
+  const drawer = players[0];
+  game.startTurn(room, drawer.id, () => {});
+  const slipId = room.round.currentSlipId;
+  game.correctGuess(room, drawer.id, slipId, room.round.turnId);
+
+  const slip = room.pool[slipId];
+  assert.ok(slip.authorName, 'author name recorded at pool build');
+  assert.equal(slip.scoredBy[0].playerName, room.players.get(drawer.id).name);
+
+  // they leave; the end-of-game recap must still name them
+  const author = slip.authorId;
+  const authorName = slip.authorName;
+  rooms.removePlayer(room, author);
+  rooms.removePlayer(room, drawer.id);
+  assert.equal(room.pool[slipId].authorName, authorName);
+  assert.equal(room.pool[slipId].scoredBy[0].playerName, 'Alice');
+  stopTimer(room);
+});
+
+/** guess every slip in the current round, ending it */
+function playOutRound(room) {
+  let guard = 0;
+  const startingPhase = room.phase;
+  while (room.phase === startingPhase && guard++ < 100) {
+    const drawerId = room.round.drawerId;
+    if (!room.round.turnEndsAt) {
+      const started = game.startTurn(room, drawerId, () => {});
+      if (!started.ok) return started; // blocked (e.g. by the ready gate)
+    }
+    if (!room.round.currentSlipId) break;
+    const res = game.correctGuess(room, drawerId, room.round.currentSlipId, room.round.turnId);
+    game.endTurnIfRoundOver(room, res.roundEnded);
+  }
+  return { ok: true };
+}
+
+test('a finished round holds the next one shut until everyone is ready', () => {
+  const { room, players } = setup(1);
+  playOutRound(room);
+  assert.equal(room.phase, 'ROUND2');
+  assert.equal(room.round.awaitingReady, true, 'round 2 waits');
+
+  // the drawer cannot sneak a turn in behind everyone else's recap
+  const blocked = game.startTurn(room, room.round.drawerId, () => {});
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /ready/);
+
+  for (const p of players.slice(0, 3)) {
+    assert.equal(game.markReady(room, p.id).ok, true);
+    assert.equal(room.round.awaitingReady, true, 'still waiting on the last player');
+  }
+  game.markReady(room, players[3].id);
+  assert.equal(room.round.awaitingReady, false, 'last ready opens the round');
+  assert.equal(game.startTurn(room, room.round.drawerId, () => {}).ok, true);
+  stopTimer(room);
+});
+
+test('the host can open the round without waiting', () => {
+  const { room } = setup(1);
+  playOutRound(room);
+  assert.equal(room.round.awaitingReady, true);
+
+  assert.equal(game.startRoundNow(room).ok, true);
+  assert.equal(room.round.awaitingReady, false);
+  assert.equal(game.startRoundNow(room).ok, false); // nothing left to open
+  stopTimer(room);
+});
+
+test('a player dropping out mid-recap does not hold the round shut forever', () => {
+  const { room, players } = setup(1);
+  playOutRound(room);
+  assert.equal(room.round.awaitingReady, true);
+
+  for (const p of players.slice(0, 3)) game.markReady(room, p.id);
+  assert.equal(room.round.awaitingReady, true, 'still waiting on the fourth');
+
+  // they close their tab instead of tapping ready
+  room.players.get(players[3].id).connected = false;
+  game.refreshReadyGate(room);
+  assert.equal(room.round.awaitingReady, false, 'gate re-evaluates against who is actually here');
+  stopTimer(room);
+});
+
+test('there is no ready gate into the final scores', () => {
+  const { room, players } = setup(1);
+  for (const phase of ['ROUND1', 'ROUND2']) {
+    assert.equal(room.phase, phase);
+    playOutRound(room);
+    game.startRoundNow(room);
+  }
+  assert.equal(room.phase, 'ROUND3');
+  playOutRound(room);
+  assert.equal(room.phase, 'SCORES');
+  assert.equal(room.round.awaitingReady, false, 'the scores screen is the recap');
+  assert.equal(room.roundScores.length, 3);
+  assert.ok(players.length);
+  stopTimer(room);
+});
+
+test('play again reopens the lobby around the same people', () => {
+  const { room, players } = setup(1);
+  playOutRound(room);
+  game.startRoundNow(room);
+  playOutRound(room);
+  game.startRoundNow(room);
+  playOutRound(room);
+  assert.equal(room.phase, 'SCORES');
+  assert.ok(room.teamScores.A + room.teamScores.B > 0);
+
+  game.resetForRematch(room);
+
+  assert.equal(room.phase, 'LOBBY');
+  assert.equal(room.players.size, players.length, 'everyone is still here');
+  assert.equal(room.hostId, players[0].id, 'and still the host');
+  assert.deepEqual(room.teamScores, { A: 0, B: 0 });
+  assert.deepEqual(room.roundScores, []);
+  assert.deepEqual(room.submissions, {});
+  assert.deepEqual(room.pool, {});
+  assert.equal(room.round.drawerId, null);
+  assert.equal(room.round.awaitingReady, false);
+  assert.equal(room.config.wordsPerPlayer, 1, 'settings are kept');
+
+  // and it can actually be played again
+  game.startWriting(room);
+  for (const p of players) assert.equal(game.submitWords(room, p.id, ['again']).ok, true);
+  game.beginRound1(room);
+  assert.equal(room.phase, 'ROUND1');
+  assert.equal(room.round.remaining.length, players.length);
+  stopTimer(room);
+});

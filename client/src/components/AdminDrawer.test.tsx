@@ -1,5 +1,5 @@
 import { test, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { makeState } from '../test-fixtures';
 
 const { mockUseGame } = vi.hoisted(() => ({ mockUseGame: vi.fn() }));
@@ -103,6 +103,31 @@ test('lists only connected players as hand-over targets', () => {
     }),
   });
   render(<AdminDrawer />);
-  expect(screen.getByRole('option', { name: /Alice/, hidden: true })).toBeInTheDocument();
-  expect(screen.queryByRole('option', { name: /Bob/, hidden: true })).not.toBeInTheDocument();
+  // scoped to the hand-over select: the kick select deliberately lists offline
+  // players too, since someone who has left is exactly who you want to remove
+  const handOver = screen.getAllByRole('combobox', { hidden: true })[0];
+  const options = within(handOver).getAllByRole('option', { hidden: true });
+  const labels = options.map((o) => o.textContent);
+  expect(labels.some((l) => l?.includes('Alice'))).toBe(true);
+  expect(labels.some((l) => l?.includes('Bob'))).toBe(false); // offline
+});
+
+test('the kick list includes offline players but never the host', () => {
+  mockUseGame.mockReturnValue({
+    state: makeState({
+      phase: 'ROUND1',
+      hostId: 'p1',
+      players: [
+        { id: 'p1', name: 'Alice', team: 'A', connected: true },
+        { id: 'p2', name: 'Bob', team: 'B', connected: false },
+      ],
+    }),
+  });
+  render(<AdminDrawer />);
+  const kickSelect = screen.getAllByRole('combobox', { hidden: true })[1];
+  const labels = within(kickSelect)
+    .getAllByRole('option', { hidden: true })
+    .map((o) => o.textContent);
+  expect(labels.some((l) => l?.includes('Bob'))).toBe(true);
+  expect(labels.some((l) => l?.includes('Alice'))).toBe(false); // can't kick yourself
 });

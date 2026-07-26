@@ -46,3 +46,28 @@ test('non-host does not see the settings/start panel', () => {
   render(<Lobby />);
   expect(screen.queryByRole('button', { name: /Start game/ })).not.toBeInTheDocument();
 });
+
+test('only the host can close the room, and it takes a confirmation', async () => {
+  const { default: userEvent } = await import('@testing-library/user-event');
+  const { emitAck } = await import('../socket');
+  const state = makeState();
+
+  mockUseGame.mockReturnValue({ state, identity: { playerId: 'p1' }, isHost: false, leaveToLanding: vi.fn() });
+  const { unmount } = render(<Lobby />);
+  expect(screen.queryByRole('button', { name: /End room for everyone/ })).not.toBeInTheDocument();
+  unmount();
+
+  mockUseGame.mockReturnValue({ state, identity: { playerId: 'p1' }, isHost: true, leaveToLanding: vi.fn() });
+  render(<Lobby />);
+  const button = screen.getByRole('button', { name: /End room for everyone/ });
+
+  // closing a room out from under everyone shouldn't happen on a stray tap
+  const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  await userEvent.click(button);
+  expect(emitAck).not.toHaveBeenCalledWith('end-room');
+
+  confirm.mockReturnValue(true);
+  await userEvent.click(button);
+  expect(emitAck).toHaveBeenCalledWith('end-room');
+  confirm.mockRestore();
+});

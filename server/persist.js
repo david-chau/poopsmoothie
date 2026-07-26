@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { rooms } from './rooms.js';
+import { rooms, hashSecret } from './rooms.js';
 
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
@@ -20,7 +20,16 @@ function serializeRoom(room) {
 }
 
 function deserializeRoom(obj) {
-  const players = new Map((obj.players || []).map((p) => [p.id, { ...p, connected: false, socketId: null }]));
+  const players = new Map(
+    (obj.players || []).map((p) => {
+      const player = { ...p, connected: false, socketId: null };
+      // rooms written before secrets were hashed still carry the plaintext;
+      // convert on load and drop it, so an old file self-heals on first boot
+      if (player.secret && !player.secretHash) player.secretHash = hashSecret(player.secret);
+      delete player.secret;
+      return [p.id, player];
+    }),
+  );
   return { ...obj, players, round: { ...obj.round, timeoutHandle: null } };
 }
 

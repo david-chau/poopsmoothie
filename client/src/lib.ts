@@ -5,6 +5,18 @@ export function playerName(state: GameState | null, playerId: string | null | un
   return state.players.find((p) => p.id === playerId)?.name ?? 'someone';
 }
 
+/** Name for an end-of-game credit. Prefers the name recorded on the record
+ *  itself, because the live roster drops anyone who left and the recap would
+ *  read "someone" for half the table. Falls back to the roster for records
+ *  written before names were captured. */
+export function recordedName(
+  state: GameState | null,
+  playerId: string | null | undefined,
+  captured: string | null | undefined,
+): string {
+  return captured || playerName(state, playerId);
+}
+
 export function playerTeamClass(state: GameState | null, playerId: string | null | undefined): string | undefined {
   if (!state || !playerId) return undefined;
   const player = state.players.find((p) => p.id === playerId);

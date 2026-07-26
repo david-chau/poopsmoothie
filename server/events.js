@@ -35,6 +35,22 @@ function publicState(room) {
       turnEndsAt: room.round.turnEndsAt,
       paused: room.round.paused,
       pauseReason: room.round.pauseReason,
+      awaitingReady: !!room.round.awaitingReady,
+      readyPlayerIds: room.round.ready ?? [],
+      // What's been guessed *this round*, for everyone. Safe: these were all
+      // said out loud as they were guessed. Scoped to the round on purpose —
+      // the pile resets each round and remembering the earlier rounds' words
+      // is the game, so we don't hand that back to people.
+      guessedThisRound: room.round.guessed.map((slipId) => {
+        const slip = room.pool[slipId];
+        const hit = slip?.scoredBy?.find((e) => e.round === roundIdx + 1);
+        return {
+          id: slipId,
+          text: slip?.text ?? '',
+          playerName: hit?.playerName ?? null,
+          team: hit?.team ?? null,
+        };
+      }),
     },
     serverNow: Date.now(),
     // gap #O: full pool + authors only revealed once the game is over.
@@ -136,6 +152,20 @@ export function registerSocketHandlers(io, socket) {
     });
   }
 
+  // Per-socket budget for room creation. Deliberately generous — a real host
+  // making a room, misreading the code and making another shouldn't be told to
+  // wait — but it stops a loop from minting hundreds.
+  const CREATE_BURST = 5;
+  const CREATE_WINDOW_MS = 30_000;
+  let createTimes = [];
+  function allowCreate() {
+    const now = Date.now();
+    createTimes = createTimes.filter((t) => now - t < CREATE_WINDOW_MS);
+    if (createTimes.length >= CREATE_BURST) return false;
+    createTimes.push(now);
+    return true;
+  }
+
   // socket.data.{roomCode, playerId} set once on join/rejoin; every later
   // event trusts only these server-held values, never client-supplied identity.
   function context() {
@@ -155,6 +185,10 @@ export function registerSocketHandlers(io, socket) {
   on('list-lobbies', (_data, ack) => ack?.({ ok: true, lobbies: publicLobbies() }));
 
   on('create-room', ({ name } = {}, ack) => {
+    if (rooms.roomCount() >= rooms.MAX_ROOMS) {
+      return ack?.({ ok: false, error: 'too many rooms on this server right now' });
+    }
+    if (!allowCreate()) return ack?.({ ok: false, error: 'slow down — try again in a moment' });
     const room = rooms.newRoom();
     const player = rooms.addPlayer(room, name);
     player.socketId = socket.id;
@@ -168,6 +202,31 @@ export function registerSocketHandlers(io, socket) {
   on('join-room', ({ roomCode, name, botToken } = {}, ack) => {
     const room = rooms.getRoom(roomCode);
     if (!room) return ack?.({ ok: false, error: 'room not found' });
+
+    // Before treating this as a new arrival: is there a disconnected slot with
+    // this name? Then it's someone coming back on a device that lost its
+    // credentials, and they should get their own team and score back rather
+    // than a fresh slot. Checked ahead of canJoin so they can return even after
+    // the doors have shut.
+    const reclaimed = rooms.reclaimSlot(room, name);
+    if (reclaimed) {
+      reclaimed.player.socketId = socket.id;
+      socket.data.roomCode = room.code;
+      socket.data.playerId = reclaimed.player.id;
+      socket.join(room.code);
+      rooms.transferHostIfNeeded(room);
+      game.recoverStrandedTurn(room);
+      persistAndBroadcast(io, room);
+      sendSlipToDrawer(io, room); // they may have been mid-turn when they dropped
+      return ack?.({
+        ok: true,
+        roomCode: room.code,
+        playerId: reclaimed.player.id,
+        secret: reclaimed.secret,
+        reclaimed: true,
+      });
+    }
+
     if (!rooms.canJoin(room)) return ack?.({ ok: false, error: 'game already started' });
     const player = rooms.addPlayer(room, name);
     // settle the bot flag here, before the roster broadcast below goes out
@@ -204,7 +263,13 @@ export function registerSocketHandlers(io, socket) {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     const result = rooms.setTeam(ctx.room, ctx.player.id, targetPlayerId, team);
-    if (result.ok) persistAndBroadcast(io, ctx.room);
+    if (result.ok) {
+      // keep the turn rotation in step — without this a mid-game switch drops
+      // the player out of the draw order permanently
+      const moved = ctx.room.players.get(targetPlayerId);
+      if (moved) game.movePlayerInTurnOrder(ctx.room, moved);
+      persistAndBroadcast(io, ctx.room);
+    }
     ack?.(result);
   });
 
@@ -260,6 +325,35 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true, removed: removed.length });
   });
 
+  // Rooms are listed openly and hot join is on by default, so a wrong-room
+  // joiner or a nuisance needs a way out that isn't "everybody restart".
+  on('kick-player', ({ playerId } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    if (playerId === ctx.player.id) return ack?.({ ok: false, error: "you can't kick yourself" });
+    const target = ctx.room.players.get(playerId);
+    if (!target) return ack?.({ ok: false, error: 'player not found' });
+
+    const wasDrawer = ROUND_PHASES.includes(ctx.room.phase) && ctx.room.round.drawerId === target.id;
+    const socketId = target.socketId;
+    rooms.removePlayer(ctx.room, target.id);
+    // don't strand the turn — or the ready gate — on someone who has gone
+    if (wasDrawer) game.skipDrawer(ctx.room);
+    game.refreshReadyGate(ctx.room);
+    // tell them why before cutting them loose, so the client can show a reason
+    // rather than silently bouncing to the landing screen
+    if (socketId) {
+      io.to(socketId).emit('room-closed', { reason: 'The host removed you from the room.' });
+      io.in(socketId).socketsLeave(ctx.room.code);
+      // a kicked bot has no UI to obey the message — cut its socket or it
+      // lingers as a connected client belonging to no room
+      if (target.isBot) io.in(socketId).disconnectSockets(true);
+    }
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
   on('start-game', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
@@ -295,7 +389,10 @@ export function registerSocketHandlers(io, socket) {
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (ctx.room.phase !== 'WRITING') return ack?.({ ok: false, error: 'not in writing phase' });
     const n = Math.max(1, Math.min(20, Math.trunc(Number(count)) || 1));
-    const words = suggestions.suggestWords(ctx.room, n, Array.isArray(exclude) ? exclude : []);
+    // the caller's own boxes — capped so a client can't hand us a million
+    // strings to normalise on every keystroke
+    const skip = Array.isArray(exclude) ? exclude.slice(0, 50) : [];
+    const words = suggestions.suggestWords(ctx.room, n, skip);
     ack?.({ ok: true, words });
   });
 
@@ -310,6 +407,25 @@ export function registerSocketHandlers(io, socket) {
     game.beginRound1(ctx.room);
     persistAndBroadcast(io, ctx.room);
     sendSlipToDrawer(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  on('player-ready', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    const result = game.markReady(ctx.room, ctx.player.id);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  on('start-round-now', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    const result = game.startRoundNow(ctx.room);
+    if (!result.ok) return ack?.(result);
+    persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
   });
 
@@ -441,7 +557,21 @@ export function registerSocketHandlers(io, socket) {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    // there's nothing to end before the words exist — jumping LOBBY -> SCORES
+    // lands everyone on a results screen with an empty pool
+    if (ctx.room.phase === 'LOBBY') return ack?.({ ok: false, error: 'game has not started' });
+    if (ctx.room.phase === 'SCORES') return ack?.({ ok: false, error: 'game already over' });
     game.endGameNow(ctx.room);
+    persistAndBroadcast(io, ctx.room);
+    ack?.({ ok: true });
+  });
+
+  on('play-again', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
+    if (ctx.room.phase !== 'SCORES') return ack?.({ ok: false, error: 'the game is still going' });
+    game.resetForRematch(ctx.room);
     persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
   });
@@ -469,6 +599,7 @@ export function registerSocketHandlers(io, socket) {
       return ack?.({ ok: true });
     }
     if (wasDrawer) game.skipDrawer(ctx.room); // they're gone for good, don't leave the turn paused forever
+    game.refreshReadyGate(ctx.room);
     persistAndBroadcast(io, ctx.room);
     ack?.({ ok: true });
   });
@@ -486,6 +617,8 @@ export function registerSocketHandlers(io, socket) {
 /** gap #4/#D/#S: host transfer, drawer-only pause, team-empty pause. */
 function handleDisconnectSideEffects(io, room, player) {
   rooms.transferHostIfNeeded(room);
+  // don't wait forever on someone who just dropped
+  game.refreshReadyGate(room);
   if (ROUND_PHASES.includes(room.phase) && room.round.drawerId === player.id) {
     game.pauseForDisconnectedDrawer(room);
   }

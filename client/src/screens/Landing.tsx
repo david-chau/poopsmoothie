@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { socket, emitAck } from '../socket';
 import { ROUND_LABELS, type Phase } from '../types';
+import { primeAudio } from '../alert';
 import RulesDialog from '../components/RulesDialog';
 
 /** Shown as the name placeholder and as the tooltip on anything a missing
@@ -81,6 +82,9 @@ export default function Landing() {
   /** Tapping a room joins straight in — the server drops you on whichever team
    *  is short (Team Blue on a tie), so there's nothing to pick on the way in. */
   async function go(joinCode = '') {
+    // everyone hears the turn-end alert, not just the drawer, and browsers only
+    // unlock audio after a real gesture — this tap is the one every player makes
+    primeAudio();
     if (!named) return setError('enter your name first');
     setBusy(true);
     setError(null);

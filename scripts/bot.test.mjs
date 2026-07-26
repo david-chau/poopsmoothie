@@ -186,3 +186,95 @@ test('the last human out takes the bots (and the room) with them', async () => {
   assert.equal(rejoin.ok, false);
   assert.match(rejoin.error, /not found/);
 });
+
+test('a bot that is ready AND the next drawer still starts its turn', async () => {
+  // Regression: the bot readied, fell through to start-turn while the gate was
+  // still shut for the humans, got refused, and marked the attempt as done —
+  // so when the round finally opened it never tried again and the game hung.
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'add-bots', { count: 3 });
+  await until(
+    () => state,
+    (s) => s.players.length === 4,
+  );
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['host-word'] });
+  await until(
+    () => state,
+    (s) => s.phase === 'ROUND1',
+    5000,
+  );
+
+  // step the human aside whenever it lands on them; bots do the rest
+  const stepAside = setInterval(() => {
+    if (state && !state.round.awaitingReady && !state.round.turnEndsAt && state.round.drawerId === create.playerId) {
+      host.emit('skip-drawer', {}, () => {});
+    }
+  }, 60);
+
+  // reach the round 2 gate, ready up as the human, and require that a turn
+  // actually gets under way afterwards
+  await until(
+    () => state,
+    (s) => s.phase === 'ROUND2' && s.round.awaitingReady === true,
+    20000,
+  );
+  await ack(host, 'player-ready');
+  await until(
+    () => state,
+    (s) => s.round.awaitingReady === false,
+    5000,
+  );
+  await until(
+    () => state,
+    (s) => s.round.turnEndsAt !== null || s.round.guessedCount > 0,
+    8000,
+  );
+  clearInterval(stepAside);
+  assert.ok(state.round.turnEndsAt || state.round.guessedCount > 0, 'round 2 is actually being played');
+});
+
+test('bots write real phrases from the suggestion bank, not filler', async () => {
+  const { SUGGESTIONS } = await import('../server/suggestions.js');
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+  await ack(host, 'set-config', { wordsPerPlayer: 3 });
+  await ack(host, 'add-bots', { count: 3 });
+  await until(
+    () => state,
+    (s) => s.players.length === 4,
+  );
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['host-a', 'host-b', 'host-c'] });
+  await until(
+    () => state,
+    (s) => s.phase === 'ROUND1',
+    6000,
+  );
+
+  // end the game so the pool (and its authors) is revealed
+  await ack(host, 'end-game');
+  await until(
+    () => state,
+    (s) => s.phase === 'SCORES',
+  );
+
+  const botIds = state.players.filter((p) => p.isBot).map((p) => p.id);
+  const botSlips = state.pool.filter((s) => botIds.includes(s.authorId));
+  assert.equal(botSlips.length, 9, '3 bots x 3 words');
+
+  for (const slip of botSlips) {
+    assert.ok(SUGGESTIONS.includes(slip.text), `"${slip.text}" should come from the suggestion bank`);
+    assert.doesNotMatch(slip.text, /-\d+$/, 'no filler-style suffixes');
+  }
+  // and the server de-duplicated across bots, as it does for the 🎲 buttons
+  assert.equal(new Set(botSlips.map((s) => s.text)).size, botSlips.length, 'no two bots wrote the same phrase');
+
+  await ack(host, 'remove-bots');
+});

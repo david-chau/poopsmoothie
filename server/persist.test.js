@@ -82,3 +82,22 @@ test('deleteRoom removes the file (and tolerates a missing one)', () => {
   assert.equal(fs.existsSync(fileFor(room.code)), false);
   assert.doesNotThrow(() => persist.deleteRoom(room.code)); // already gone
 });
+
+test('a legacy room file with a plaintext secret is migrated on load', () => {
+  const legacy = {
+    code: 'OLD1',
+    lastActivity: Date.now(),
+    hostId: 'p1',
+    phase: 'LOBBY',
+    players: [{ id: 'p1', secret: 'plaintext-secret', name: 'Al', team: 'A', connected: true }],
+    round: {},
+  };
+  fs.writeFileSync(fileFor('OLD1'), JSON.stringify(legacy));
+
+  const loaded = persist.loadAllRooms().find((r) => r.code === 'OLD1');
+  const player = loaded.players.get('p1');
+  assert.equal(player.secret, undefined, 'plaintext dropped');
+  assert.equal(player.secretHash, rooms.hashSecret('plaintext-secret'), 'converted, not invalidated');
+  // and the old credential still works, so nobody is logged out by the upgrade
+  assert.ok(rooms.findPlayerBySecret(loaded, 'p1', 'plaintext-secret'));
+});

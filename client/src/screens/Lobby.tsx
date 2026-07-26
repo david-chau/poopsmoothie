@@ -79,6 +79,19 @@ export default function Lobby() {
     setError(res.ok ? null : (res.error ?? 'could not add bots'));
   }
 
+  async function endRoom() {
+    if (!window.confirm('Close this room for everyone? All players go back to the home screen.')) return;
+    const res = await emitAck<{ ok: boolean; error?: string }>('end-room');
+    setError(res.ok ? null : (res.error ?? 'could not end the room'));
+  }
+
+  async function kickPlayer(playerId: string, name: string) {
+    // removing someone else from the game is worth one confirmation
+    if (!window.confirm(`Remove ${name} from the room?`)) return;
+    const res = await emitAck<{ ok: boolean; error?: string }>('kick-player', { playerId });
+    setError(res.ok ? null : (res.error ?? 'could not remove player'));
+  }
+
   async function removeBots() {
     const res = await emitAck<{ ok: boolean; error?: string }>('remove-bots');
     setError(res.ok ? null : (res.error ?? 'could not remove bots'));
@@ -108,6 +121,11 @@ export default function Lobby() {
               {(p.id === identity.playerId || isHost) && (
                 <button className="link-btn" onClick={() => switchTeam(p.id, team === 'A' ? 'B' : 'A')}>
                   move
+                </button>
+              )}
+              {isHost && p.id !== identity.playerId && (
+                <button className="link-btn kick-link" onClick={() => kickPlayer(p.id, p.name)}>
+                  kick
                 </button>
               )}
             </li>
@@ -212,6 +230,11 @@ export default function Lobby() {
           </p>
           <button className="btn btn-primary" onClick={startGame} disabled={connectedCount < 4}>
             Start game {connectedCount < 4 && `(need ${4 - connectedCount} more)`}
+          </button>
+          {/* "Leave room" only removes you and leaves everyone else sitting in
+              a lobby you've abandoned — this closes it for the whole table */}
+          <button className="btn btn-danger lobby-end-room" onClick={endRoom}>
+            ⛔ End room for everyone
           </button>
         </div>
       )}
