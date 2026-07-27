@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { makeState } from '../test-fixtures';
 import type { ChatMessage } from '../types';
 
-const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic } = vi.hoisted(() => ({
+const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoiceHttpsUrl } = vi.hoisted(() => ({
   mockUseGame: vi.fn(),
   mockEmitAck: vi.fn(),
   // default: no voice on this server — every existing test in this file is
@@ -15,9 +15,15 @@ const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic } = vi.ho
     return () => {};
   }),
   mockUseOpenMic: vi.fn(() => ({ on: false, level: 0, error: null, start: vi.fn(), stop: vi.fn() })),
+  // default: nothing to suggest (already secure, or no https listener)
+  mockVoiceHttpsUrl: vi.fn(() => null),
 }));
 vi.mock('../GameContext', () => ({ useGame: mockUseGame }));
-vi.mock('../socket', () => ({ emitAck: mockEmitAck, onVoiceAvailable: mockOnVoiceAvailable }));
+vi.mock('../socket', () => ({
+  emitAck: mockEmitAck,
+  onVoiceAvailable: mockOnVoiceAvailable,
+  voiceHttpsUrl: mockVoiceHttpsUrl,
+}));
 vi.mock('../useOpenMic', () => ({ useOpenMic: mockUseOpenMic }));
 
 import TurnChat from './TurnChat';
@@ -234,4 +240,47 @@ test('a mic error is surfaced distinctly from a chat-send error', () => {
   setup([]);
   render(<TurnChat />);
   expect(screen.getByText('Mic: could not access the microphone')).toBeInTheDocument();
+});
+
+test('on a plain-http origin, voice explains itself and links to the https URL', () => {
+  // jsdom has no navigator.mediaDevices by default — exactly what a browser
+  // does on an insecure origin, which is the case being covered here
+  Object.defineProperty(navigator, 'mediaDevices', { value: undefined, configurable: true });
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(true); // server HAS voice — it's this origin that can't use it
+    return () => {};
+  });
+  mockVoiceHttpsUrl.mockReturnValue('https://smoothie.dmjnas:4322/');
+  setup([]);
+  render(<TurnChat />);
+
+  const link = screen.getByRole('link', { name: /open this room over https/i });
+  expect(link).toHaveAttribute('href', 'https://smoothie.dmjnas:4322/');
+  expect(screen.getByText(/needs a secure connection/i)).toBeInTheDocument();
+});
+
+test('no https nag once the mic actually works — that would just be noise', () => {
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(true);
+    return () => {};
+  });
+  mockVoiceHttpsUrl.mockReturnValue('https://smoothie.dmjnas:4322/');
+  setup([]);
+  render(<TurnChat />); // beforeEach leaves mediaDevices present -> mic is usable
+  expect(screen.queryByText(/needs a secure connection/i)).not.toBeInTheDocument();
+});
+
+test('no https nag when the server has no voice at all — https would not help', () => {
+  Object.defineProperty(navigator, 'mediaDevices', { value: undefined, configurable: true });
+  // set explicitly rather than leaning on the hoisted default: clearAllMocks
+  // resets calls but not implementations, so an earlier test's mockImplementation
+  // would otherwise still be in force here
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(false);
+    return () => {};
+  });
+  mockVoiceHttpsUrl.mockReturnValue('https://smoothie.dmjnas:4322/');
+  setup([]);
+  render(<TurnChat />);
+  expect(screen.queryByText(/needs a secure connection/i)).not.toBeInTheDocument();
 });

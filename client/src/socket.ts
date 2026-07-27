@@ -42,14 +42,34 @@ socket.on('are-you-there', (ack?: () => void) => ack?.());
 // (which is one room's state).
 let voiceAvailable = false;
 let voiceLanguages: string[] = [];
+let voiceHttpsPort: number | null = null;
 const voiceListeners = new Set<(v: boolean) => void>();
 const voiceLanguageListeners = new Set<(langs: string[]) => void>();
-socket.on('server-info', (info: { voiceAvailable?: boolean; voiceLanguages?: string[] }) => {
-  voiceAvailable = !!info.voiceAvailable;
-  voiceLanguages = info.voiceLanguages ?? [];
-  voiceListeners.forEach((fn) => fn(voiceAvailable));
-  voiceLanguageListeners.forEach((fn) => fn(voiceLanguages));
-});
+socket.on(
+  'server-info',
+  (info: { voiceAvailable?: boolean; voiceLanguages?: string[]; voiceHttpsPort?: number | null }) => {
+    voiceAvailable = !!info.voiceAvailable;
+    voiceLanguages = info.voiceLanguages ?? [];
+    voiceHttpsPort = info.voiceHttpsPort ?? null;
+    voiceListeners.forEach((fn) => fn(voiceAvailable));
+    voiceLanguageListeners.forEach((fn) => fn(voiceLanguages));
+  },
+);
+
+/**
+ * The https URL to reach this same server on, or null if there's no point
+ * offering one (no https listener, or we're already on a secure origin).
+ *
+ * Browsers don't expose `navigator.mediaDevices` *at all* on a plain-http
+ * origin, so on the LAN URL the mic simply cannot work — and hiding the
+ * toggle with no explanation reads as "the feature is broken" rather than
+ * "you're on the wrong URL".
+ */
+export function voiceHttpsUrl(): string | null {
+  if (typeof window === 'undefined' || voiceHttpsPort == null) return null;
+  if (window.isSecureContext) return null; // already somewhere the mic can work
+  return `https://${window.location.hostname}:${voiceHttpsPort}${window.location.pathname}`;
+}
 
 /** Fires immediately with the current value, then again on every change
  *  (e.g. a reconnect to a different process). Returns an unsubscribe fn. */

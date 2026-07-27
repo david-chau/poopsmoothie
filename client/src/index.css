@@ -1737,6 +1737,16 @@ input:focus,
   line-height: 1.35;
 }
 
+.turn-chat-https-hint {
+  margin: 0;
+  padding: 0.4rem 0.55rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
 .turn-chat-time {
   flex: 0 0 auto;
   font-size: 0.7rem;

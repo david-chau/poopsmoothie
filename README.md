@@ -90,7 +90,12 @@ secure origin, so the mic toggle only shows up over `https://192.168.x.x:4322`
 (port **4322**, not 4321). Self-signed certificate — the browser will warn
 once per device; that's expected for a self-hosted server, not a sign
 anything's wrong. Text chat, and the rest of the game, work fine on the plain
-`http://` URL; only the mic needs the `https` one.
+`http://` URL; only the mic needs the `https` one. The chat panel says so
+itself, with a link, when it notices you're on an http origin and the server
+does have voice — so "where did the mic go?" answers itself in the app rather
+than here. (Browsers don't merely block `getUserMedia` on an insecure origin,
+they don't define `navigator.mediaDevices` at all, which is why this is a
+different URL rather than a permission prompt.)
 
 (Building from source instead of pulling the image? See
 [Option A](#option-a--build-on-the-host) below.)

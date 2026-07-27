@@ -84,8 +84,17 @@ try {
   console.warn(`voice capture unavailable, text chat still works (${err.message})`);
 }
 
+// Set once the https listener is actually up (below). Sent to clients so a
+// browser sitting on the plain-http URL — where getUserMedia doesn't exist at
+// all — can say *which* URL to use instead of just hiding the mic silently.
+let voiceHttpsPort = null;
+
 io.on('connection', (socket) => {
-  socket.emit('server-info', { voiceAvailable: !!sttEngine, voiceLanguages: sttEngine?.languages ?? [] });
+  socket.emit('server-info', {
+    voiceAvailable: !!sttEngine,
+    voiceLanguages: sttEngine?.languages ?? [],
+    voiceHttpsPort,
+  });
   registerSocketHandlers(io, socket, sttEngine);
 });
 
@@ -101,7 +110,10 @@ try {
   const { key, cert } = await getOrCreateCert(DATA_DIR);
   const httpsServer = createHttpsServer({ key, cert }, app);
   io.attach(httpsServer);
-  httpsServer.listen(HTTPS_PORT, () => console.log(`poopsmoothie (https, for mic access) listening on :${HTTPS_PORT}`));
+  httpsServer.listen(HTTPS_PORT, () => {
+    voiceHttpsPort = Number(HTTPS_PORT);
+    console.log(`poopsmoothie (https, for mic access) listening on :${HTTPS_PORT}`);
+  });
 } catch (err) {
   console.warn(`HTTPS listener not started, mic capture will be unavailable (${err.message})`);
 }

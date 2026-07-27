@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
-import { emitAck, onVoiceAvailable } from '../socket';
+import { emitAck, onVoiceAvailable, voiceHttpsUrl } from '../socket';
 import { useOpenMic } from '../useOpenMic';
 import VoiceEnroll from './VoiceEnroll';
 import { TEAM_CLASS, type ChatMessage } from '../types';
@@ -57,6 +57,10 @@ export default function TurnChat() {
   // instant this module first loaded
   const micSupported = typeof navigator !== 'undefined' && !!navigator.mediaDevices?.getUserMedia;
   const micVisible = micSupported && voiceAvailable;
+  // The server has voice, this browser can't use it here — which on a LAN is
+  // almost always "you're on the http URL". Say so, with the URL that works,
+  // rather than leaving a feature-shaped hole.
+  const httpsUrl = voiceAvailable && !micSupported ? voiceHttpsUrl() : null;
 
   useEffect(() => onVoiceAvailable(setVoiceAvailable), []);
   const listRef = useRef<HTMLUListElement>(null);
@@ -136,6 +140,14 @@ export default function TurnChat() {
       </div>
 
       {micVisible && <VoiceEnroll enrolled={!!me?.voiceEnrolled} />}
+
+      {httpsUrl && (
+        <p className="turn-chat-https-hint">
+          🎤 Voice chat needs a secure connection —{' '}
+          <a href={httpsUrl}>open this room over https</a> (your browser will warn once about the
+          self-signed certificate; that's expected on a home server). Typing works either way.
+        </p>
+      )}
 
       <ul className="turn-chat-log" ref={listRef} onScroll={handleScroll}>
         {visible.length === 0 && <li className="turn-chat-empty">Nothing here yet.</li>}
