@@ -73,7 +73,10 @@ async function fullRoomToRound1() {
     const r = await ack(socks[i], 'join-room', { roomCode: create.roomCode, name: `P${i}` });
     creds.push({ playerId: r.playerId, secret: r.secret });
   }
-  await ack(socks[0], 'set-config', { wordsPerPlayer: 1, turnSeconds: 60 });
+  // chatEnabled defaults off (a beta feature, opt-in per room) — this test
+  // helper is shared by chat tests too, so turn it on here rather than in
+  // every individual test
+  await ack(socks[0], 'set-config', { wordsPerPlayer: 1, turnSeconds: 60, chatEnabled: true });
   await ack(socks[0], 'start-game');
   for (let i = 0; i < 4; i++) await ack(socks[i], 'submit-words', { words: [`w${i}`] });
   await wait(120);
@@ -892,4 +895,114 @@ test('refreshing in a solo game with bots gets the host controls back', async ()
   assert.equal(holder.isBot, false);
 
   await ack(refreshed, 'remove-bots');
+});
+
+// chat-send deliberately does NOT persistAndBroadcast (see the handler), so a
+// cached `state` never updates from it alone — these tests listen on
+// 'chat-message' directly, which is the real fast path (and what the client
+// actually appends into its local state; see GameContext).
+function chatLogOf(socket) {
+  const log = [];
+  socket.on('chat-message', (m) => log.push(m));
+  return log;
+}
+
+test('chat-send: authed, phase-gated, trimmed and capped, broadcast to everyone', async () => {
+  const host = await connect();
+  await ack(host, 'create-room', { name: 'Host' });
+
+  // no room, no round yet — both refused
+  const stray = await connect();
+  assert.equal((await ack(stray, 'chat-send', { text: 'hi' })).ok, false);
+  assert.equal((await ack(host, 'chat-send', { text: 'too early' })).ok, false); // LOBBY
+
+  const { socks } = await fullRoomToRound1();
+  const senderLog = chatLogOf(socks[0]);
+  const otherLog = chatLogOf(socks[1]); // a DIFFERENT socket, not just the sender's own echo
+
+  const res = await ack(socks[0], 'chat-send', { text: '  hello table  ' });
+  assert.equal(res.ok, true);
+  await wait(60);
+
+  assert.equal(senderLog.length, 1);
+  const msg = senderLog[0];
+  assert.equal(msg.text, 'hello table'); // trimmed
+  assert.equal(msg.name, 'Host');
+  assert.equal(msg.via, 'text');
+  assert.ok(msg.id && msg.at);
+  assert.deepEqual(otherLog[0], msg);
+
+  // empty / whitespace-only refused
+  assert.equal((await ack(socks[0], 'chat-send', { text: '   ' })).ok, false);
+  // absurdly long text is capped, not rejected
+  const long = await ack(socks[0], 'chat-send', { text: 'x'.repeat(500) });
+  assert.equal(long.ok, true);
+  await wait(60);
+  assert.equal(senderLog.at(-1).text.length, 200);
+});
+
+test('chat-send: the drawer badge follows whoever is drawing right now', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  const drawerIdx = getState().players.findIndex((p) => p.id === getState().round.drawerId);
+  const otherIdx = drawerIdx === 0 ? 1 : 0;
+  const log = chatLogOf(socks[drawerIdx]);
+
+  await ack(socks[drawerIdx], 'chat-send', { text: 'from the drawer' });
+  await ack(socks[otherIdx], 'chat-send', { text: 'from a guesser' });
+  await wait(60);
+
+  assert.equal(log[0].wasDrawer, true);
+  assert.equal(log[1].wasDrawer, false);
+});
+
+test('chat is cleared at the start of every round, not carried forward', async () => {
+  const { socks, getState } = await fullRoomToRound1();
+  await ack(socks[0], 'chat-send', { text: 'round 1 chatter' });
+  await wait(60);
+  assert.equal(getState().round.remainingCount, 4); // 1 word x 4 players, precondition
+
+  // guess every slip from the same drawer (correct-guess only rotates drawer at
+  // a round *boundary*, so one drawer clears the whole round in one turn)
+  const drawerIdx = getState().players.findIndex((p) => p.id === getState().round.drawerId);
+  const drawer = socks[drawerIdx];
+  let revealed = new Promise((r) => drawer.once('slip-revealed', r));
+  await ack(drawer, 'start-turn');
+  let { slip, turnId } = await revealed;
+  for (let i = 0; i < 4; i++) {
+    const next = i < 3 ? new Promise((r) => drawer.once('slip-revealed', r)) : null;
+    await ack(drawer, 'correct-guess', { slipId: slip.id, turnId });
+    if (next) ({ slip, turnId } = await next);
+  }
+  await wait(80);
+  assert.equal(getState().phase, 'ROUND2');
+
+  // round 2 opens behind the ready gate — lift it directly rather than re-play
+  if (getState().round.awaitingReady) {
+    for (const s of socks) await ack(s, 'player-ready');
+    await wait(80);
+  }
+  assert.equal(getState().round.chat.length, 0, 'new round starts with an empty transcript');
+});
+
+test('chat-send is rate-limited per socket', async () => {
+  const { socks } = await fullRoomToRound1();
+  const results = [];
+  for (let i = 0; i < 12; i++) results.push(await ack(socks[0], 'chat-send', { text: `msg ${i}` }));
+  const ok = results.filter((r) => r.ok).length;
+  assert.ok(ok >= 1 && ok < 12, `expected a burst then a stop, got ${ok}/12 ok`);
+  assert.match(results.at(-1).error ?? '', /slow down/);
+});
+
+test('a hot-joiner sees the existing chat history via state, not just new messages', async () => {
+  const { socks, roomCode, getState } = await fullRoomToRound1();
+  await ack(socks[0], 'chat-send', { text: 'already said this' });
+  await wait(60);
+
+  const late = await connect();
+  const lateState = latestStateOf(late);
+  await ack(late, 'join-room', { roomCode, name: 'Latecomer' });
+  await wait(80);
+
+  assert.equal(getState().config.hotJoin, true);
+  assert.ok(lateState().round.chat.some((m) => m.text === 'already said this'));
 });

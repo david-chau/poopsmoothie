@@ -8,6 +8,8 @@ export interface PlayerPublic {
   connected: boolean;
   /** host-spawned test player (server/bots.js), not a real device */
   isBot?: boolean;
+  /** has a voiceprint on file (server/stt.js) — never the print itself */
+  voiceEnrolled?: boolean;
 }
 
 export interface Slip {
@@ -19,6 +21,20 @@ export interface Slip {
   authorName?: string | null;
   /** who scored it, per round (same slip is reused every round) */
   scoredBy?: { round: number; team: Team; playerId: string; playerName?: string | null }[];
+}
+
+/** Audit-trail chat for the live round only — see server/rooms.js `round.chat`.
+ *  name/team/wasDrawer are captured at send time, not looked up live, so a
+ *  transcript reads the same after someone leaves or the turn moves on. */
+export interface ChatMessage {
+  id: string;
+  playerId: string;
+  name: string;
+  team: Team;
+  wasDrawer: boolean;
+  via: 'text' | 'voice';
+  text: string;
+  at: number;
 }
 
 export interface RoundPublic {
@@ -36,6 +52,8 @@ export interface RoundPublic {
   /** guessed so far *this round* — resets each round, since remembering the
    *  earlier rounds' words is the game */
   guessedThisRound: { id: string; text: string; playerName: string | null; team: Team | null }[];
+  /** cleared every round — see ChatMessage */
+  chat: ChatMessage[];
 }
 
 /** Mirrors server events.js `publicState()`. Never carries slip text
@@ -48,6 +66,10 @@ export interface GameState {
     turnSeconds: number;
     /** latecomers can drop into a game already in progress */
     hotJoin: boolean;
+    /** the chat/voice audit trail — off by default, a per-room opt-in (beta) */
+    chatEnabled: boolean;
+    /** one language at a time, never mixed — see server/stt.js */
+    voiceLanguage: 'en' | 'zh';
     allowSkip: Record<'ROUND1' | 'ROUND2' | 'ROUND3', boolean>;
   };
   phase: Phase;

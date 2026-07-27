@@ -25,6 +25,14 @@ for _ in $(seq 30); do
     else
       echo "  guests:  (no LAN IP found — check System Settings > Network)"
     fi
+    # -k: it's a self-signed cert, that warning is expected and one-time per device
+    if curl -fsSk -o /dev/null https://localhost:4322/ 2>/dev/null; then
+      echo
+      echo "  mic/voice chat needs https (getUserMedia requires it) — same game, different port:"
+      if [ -n "$lan_ip" ]; then
+        echo "  guests:  https://${lan_ip}:4322   <- browser will warn once (self-signed), then remember"
+      fi
+    fi
     echo
     exit 0
   fi

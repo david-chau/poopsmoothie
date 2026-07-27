@@ -1,6 +1,7 @@
 node_modules/
 client/dist/
-data/rooms/
+/data/
 *.log
 .DS_Store
 docs/media/*.webm
+/models/

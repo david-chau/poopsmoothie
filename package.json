@@ -16,10 +16,13 @@
     "test:all": "npm test && npm run test:client",
     "test:e2e": "node --test --test-timeout=300000 scripts/e2e.mjs",
     "bots": "node scripts/dev-bots.mjs",
-    "record": "npm run build:client && node scripts/record.mjs"
+    "record": "npm run build:client && node scripts/record.mjs",
+    "stt-bench": "node scripts/stt-bench.mjs"
   },
   "dependencies": {
     "express": "^4.21.2",
+    "selfsigned": "^5.5.0",
+    "sherpa-onnx-node": "^1.13.4",
     "socket.io": "^4.8.1",
     "socket.io-client": "^4.8.1"
   },

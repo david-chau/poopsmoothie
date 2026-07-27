@@ -1,11 +1,91 @@
+import { randomUUID } from 'node:crypto';
 import * as rooms from './rooms.js';
 import * as game from './game.js';
 import * as persist from './persist.js';
 import * as suggestions from './suggestions.js';
 import * as bots from './bots.js';
+import { SettleBuffer, matchEnrolledSpeaker } from './arbiter.js';
+import { LANGUAGES as VOICE_LANGUAGES } from './stt.js';
 
 const ROUND_PHASES = ['ROUND1', 'ROUND2', 'ROUND3'];
 const INVALID_NAME = 'Invalid name — that prefix is reserved for bots';
+
+// Overridable for the same reason as the settle window below — tuned per the
+// plan's ~0.45-0.55 estimate; scripts/stt-bench.mjs is where you'd actually
+// tune this for a real room full of enrolled voices.
+const VOICE_EMBEDDING_THRESHOLD = Number(process.env.PS_VOICE_EMBEDDING_THRESHOLD) || 0.5;
+
+/** Every currently-enrolled player in the room, as playerId -> Float32Array —
+ *  the shape matchEnrolledSpeaker wants. Rebuilt fresh each delivery rather
+ *  than cached: enrollment can happen at any time, including mid-round. */
+function enrolledEmbeddingsFor(room) {
+  const map = new Map();
+  for (const p of room.players.values()) {
+    if (p.voiceEmbedding) map.set(p.id, Float32Array.from(p.voiceEmbedding));
+  }
+  return map;
+}
+
+// One cross-device dedup buffer per room (not per socket — the whole point is
+// collapsing utterances *across* different players' phones), created lazily
+// on first use. Lives here rather than on the room object itself: it holds a
+// live timer, same reasoning as round.timeoutHandle never being persisted.
+const voiceBuffers = new Map(); // room code -> SettleBuffer
+
+// Overridable so tests don't have to burn real wall-clock time per assertion.
+// 250ms, down from an original 800ms: this is pure added latency for the
+// common case (one speaker, nobody to dedup against). Two phones hearing the
+// same shout fire their VADs within tens of ms of each other and are a couple
+// of ms apart on a LAN, so the window only has to cover that jitter.
+const VOICE_SETTLE_MS = Number(process.env.PS_VOICE_SETTLE_MS) || 250;
+
+function voiceBufferFor(io, room) {
+  let buf = voiceBuffers.get(room.code);
+  if (!buf) {
+    buf = new SettleBuffer((result) => deliverVoiceMessage(io, room.code, result), { windowMs: VOICE_SETTLE_MS });
+    voiceBuffers.set(room.code, buf);
+  }
+  return buf;
+}
+
+function forgetVoiceBuffer(code) {
+  voiceBuffers.get(code)?.flushNow();
+  voiceBuffers.delete(code);
+}
+
+/** The settle window's flush callback — fires up to ~0.8s after the winning
+ *  utterance was captured, so the room/round may have moved on since. Re-fetch
+ *  everything fresh rather than trusting anything closed over at submit time,
+ *  same principle as onFinal re-checking context() before it hands off here. */
+function deliverVoiceMessage(io, roomCode, result) {
+  const room = rooms.getRoom(roomCode);
+  if (!room || !room.config.chatEnabled || !ROUND_PHASES.includes(room.phase)) return;
+
+  // Device-prior attribution (whichever socket the winning capture arrived
+  // on) is the default; a confident voice match overrides it — this is what
+  // closes the "David's phone was in his pocket, only Jill's phone heard him"
+  // gap that dedup alone can't (nobody's own device captured him at all).
+  let playerId = result.playerId;
+  const matched = matchEnrolledSpeaker(result.embedding, enrolledEmbeddingsFor(room), VOICE_EMBEDDING_THRESHOLD);
+  if (matched) playerId = matched;
+
+  const player = room.players.get(playerId);
+  if (!player) return; // they left before this settled
+  const message = {
+    id: randomUUID(),
+    playerId: player.id,
+    name: player.name,
+    team: player.team,
+    wasDrawer: room.round.drawerId === player.id,
+    via: 'voice',
+    text: result.text,
+    at: Date.now(),
+  };
+  room.round.chat.push(message);
+  if (room.round.chat.length > 200) room.round.chat.shift();
+  persist.saveRoom(room);
+  io.to(room.code).emit('chat-message', message);
+}
 
 /** Public snapshot broadcast to the whole room. Never contains slip text
  *  (gaps #1/#O) — only counts, scores, and identifiers. */
@@ -22,6 +102,9 @@ function publicState(room) {
       team: p.team,
       connected: p.connected,
       isBot: !!p.isBot,
+      // whether they've recorded a voiceprint (Phase 5) — never the print
+      // itself, which is meaningless to a client and not something to hand out
+      voiceEnrolled: !!p.voiceEmbedding,
     })),
     submittedPlayerIds: Object.keys(room.submissions),
     activeTeam: room.activeTeam,
@@ -52,6 +135,8 @@ function publicState(room) {
           team: hit?.team ?? null,
         };
       }),
+      // audit trail for the live round; ?? for rooms persisted before this existed
+      chat: room.round.chat ?? [],
     },
     serverNow: Date.now(),
     // gap #O: full pool + authors only revealed once the game is over.
@@ -146,7 +231,7 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, n));
 }
 
-export function registerSocketHandlers(io, socket) {
+export function registerSocketHandlers(io, socket, stt = null) {
   /**
    * Every handler is registered through here rather than socket.on directly.
    * A client controls both the payload *shape* and whether it sends one at all,
@@ -188,6 +273,50 @@ export function registerSocketHandlers(io, socket) {
     if (createTimes.length >= CREATE_BURST) return false;
     createTimes.push(now);
     return true;
+  }
+
+  // Per-socket chat budget — same shape as allowCreate above. Generous enough
+  // that nobody notices it while playing normally; it exists to stop a loop
+  // from flooding the room (and disk — every message is persisted).
+  const CHAT_BURST = 8;
+  const CHAT_WINDOW_MS = 5_000;
+  let chatTimes = [];
+  function allowChat() {
+    const now = Date.now();
+    chatTimes = chatTimes.filter((t) => now - t < CHAT_WINDOW_MS);
+    if (chatTimes.length >= CHAT_BURST) return false;
+    chatTimes.push(now);
+    return true;
+  }
+
+  // Open-mic frames arrive automatically (~4/s while a mic is on), not from a
+  // user action, so this isn't a "burst of clicking" guard like the ones
+  // above — it's a ceiling on how far a buggy or hostile client can stray from
+  // the ~250ms cadence the real capture code uses, plus a hard per-frame size
+  // cap so nobody can hand the server an arbitrarily large "frame".
+  const AUDIO_FRAME_MAX_BYTES = 64 * 1024; // real frames are ~8KB (250ms @ 16kHz Int16)
+  // A one-shot enrollment clip, not a stream — generous enough for an ~8s
+  // recording (16kHz * 2 bytes/sample * 8s = 256KB) with room to spare.
+  const ENROLL_MAX_BYTES = 320 * 1024;
+  const AUDIO_FRAME_BURST = 20;
+  const AUDIO_FRAME_WINDOW_MS = 2_000;
+  let audioFrameTimes = [];
+  function allowAudioFrame() {
+    const now = Date.now();
+    audioFrameTimes = audioFrameTimes.filter((t) => now - t < AUDIO_FRAME_WINDOW_MS);
+    if (audioFrameTimes.length >= AUDIO_FRAME_BURST) return false;
+    audioFrameTimes.push(now);
+    return true;
+  }
+
+  // One STT session per socket, only while its mic is toggled on. Lives here
+  // (not on ctx.room/player) same reasoning as the rate-limit buckets above —
+  // it's per-connection, not per-player, so a reconnect starts clean rather
+  // than inheriting a stale native handle from a socket that's already gone.
+  let micSession = null;
+  function closeMicSession() {
+    micSession?.close();
+    micSession = null;
   }
 
   // socket.data.{roomCode, playerId} set once on join/rejoin; every later
@@ -331,12 +460,26 @@ export function registerSocketHandlers(io, socket) {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!rooms.isHost(ctx.room, ctx.player.id)) return ack?.({ ok: false, error: 'host only' });
-    // hotJoin isn't a game-balance setting — it's a door. Let the host shut it
-    // (or reopen it) mid-game, unlike everything below which locks at start.
+    // hotJoin, chatEnabled and voiceLanguage aren't game-balance settings —
+    // they're doors. Let the host flip any of them any time, unlike
+    // everything below which locks once play starts.
+    let doorFieldsSet = 0;
     if (config.hotJoin != null) {
       ctx.room.config.hotJoin = !!config.hotJoin;
+      doorFieldsSet++;
+    }
+    if (config.chatEnabled != null) {
+      ctx.room.config.chatEnabled = !!config.chatEnabled;
+      doorFieldsSet++;
+    }
+    if (config.voiceLanguage != null) {
+      if (!VOICE_LANGUAGES.includes(config.voiceLanguage)) return ack?.({ ok: false, error: 'unknown voice language' });
+      ctx.room.config.voiceLanguage = config.voiceLanguage;
+      doorFieldsSet++;
+    }
+    if (doorFieldsSet > 0) {
       persistAndBroadcast(io, ctx.room);
-      if (Object.keys(config).length === 1) return ack?.({ ok: true });
+      if (Object.keys(config).length === doorFieldsSet) return ack?.({ ok: true });
     }
     if (ctx.room.phase !== 'LOBBY' && ctx.room.phase !== 'WRITING') {
       return ack?.({ ok: false, error: 'config locked once play starts' }); // gap #R
@@ -515,6 +658,124 @@ export function registerSocketHandlers(io, socket) {
     ack?.({ ok: true });
   });
 
+  // Audit trail, not gameplay: text (and later voice) chat scoped to the live
+  // round. Deliberately NOT persistAndBroadcast — a full state + lobbies
+  // rebroadcast per chat line is a lot of weight for one line of text, and
+  // nobody else's view of the game changes when a message is sent. The full
+  // history still rides in publicState().round.chat for join/rejoin/refresh;
+  // this event is just the fast path so new messages show up immediately.
+  on('chat-send', ({ text } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
+    if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no round in progress' });
+    const trimmed = String(text ?? '').trim().slice(0, 200);
+    if (!trimmed) return ack?.({ ok: false, error: 'message is empty' });
+    if (!allowChat()) return ack?.({ ok: false, error: 'slow down — try again in a moment' });
+
+    // name/team/wasDrawer captured now, not looked up at render time — same
+    // reasoning as pool[].scoredBy: a player who later leaves or a turn that
+    // moves on must not rewrite what already happened in the transcript.
+    const message = {
+      id: randomUUID(),
+      playerId: ctx.player.id,
+      name: ctx.player.name,
+      team: ctx.player.team,
+      wasDrawer: ctx.room.round.drawerId === ctx.player.id,
+      via: 'text',
+      text: trimmed,
+      at: Date.now(),
+    };
+    ctx.room.round.chat.push(message);
+    if (ctx.room.round.chat.length > 200) ctx.room.round.chat.shift(); // cap, drop oldest
+    persist.saveRoom(ctx.room);
+    io.to(ctx.room.code).emit('chat-message', message);
+    ack?.({ ok: true });
+  });
+
+  // Open mic: same audit trail as chat-send, just fed by voice-to-text instead
+  // of typing. `stt` is the whole server's shared engine (models + one
+  // NAS-wide concurrency-capped decode queue, see stt.js) — null when the box
+  // has no model files, exactly like a missing TLS cert disables https rather
+  // than crashing the app.
+  on('mic-on', (_data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
+    if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no round in progress' });
+    if (!stt) return ack?.({ ok: false, error: 'voice capture is not available on this server' });
+    closeMicSession(); // re-enabling mid-session (e.g. after a drop) starts clean, not doubled up
+    micSession = stt.createSession({
+      // fixed for this session's lifetime — changing the room's language
+      // mid-stream takes effect on the next mic-on, not retroactively
+      language: ctx.room.config.voiceLanguage,
+      // Not posted directly: handed to the room's cross-device dedup buffer
+      // (server/arbiter.js), which holds it for a short settle window in case
+      // another phone's mic caught the same shout, then delivers the best
+      // capture via deliverVoiceMessage. Re-checked here (not just at
+      // mic-on) because the segment may finish decoding well after the round
+      // ended, the player left, or the host turned chat off mid-stream.
+      onFinal: (text, meta) => {
+        const c = context();
+        if (!c || !c.room.config.chatEnabled || !ROUND_PHASES.includes(c.room.phase)) return;
+        voiceBufferFor(io, c.room).submit({ playerId: c.player.id, text: text.slice(0, 200), ...meta });
+      },
+      onWarn: (err) => console.warn(`voice: session error for socket ${socket.id}:`, err.message),
+    });
+    ack?.({ ok: true });
+  });
+
+  on('mic-off', (_data, ack) => {
+    closeMicSession();
+    ack?.({ ok: true });
+  });
+
+  // A ~4s deliberate sample (not the continuous audio-frame stream — this is
+  // a one-shot action, so a normal acked event is fine) computed into a
+  // voiceprint and stored on the player. Persists with the room like anything
+  // else on it; re-enrolling just overwrites. Allowed any time a room exists
+  // (not phase-gated) — it's a profile action, not gameplay, and the point is
+  // getting it done with zero friction, including before the round it'd help with.
+  on('enroll-voice', (data, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
+    if (!stt) return ack?.({ ok: false, error: 'voice capture is not available on this server' });
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (buf.length === 0 || buf.length > ENROLL_MAX_BYTES || buf.length % 2 !== 0) {
+      return ack?.({ ok: false, error: 'invalid recording' });
+    }
+    try {
+      const embedding = stt.computeEnrollment(new Int16Array(new Uint8Array(buf).buffer));
+      ctx.player.voiceEmbedding = Array.from(embedding);
+    } catch (err) {
+      console.warn(`voice: enrollment failed for socket ${socket.id}:`, err.message);
+      return ack?.({ ok: false, error: 'could not process recording' });
+    }
+    persistAndBroadcast(io, ctx.room); // voiceEnrolled is part of publicState's player list
+    ack?.({ ok: true });
+  });
+
+  // Fire-and-forget: no ack (an ack round-trip on every ~500ms frame is pure
+  // overhead the caller doesn't need — see useOpenMic.ts's volatile emit).
+  // Binary payload, not the usual `{field: ...}` shape — the guarded `on()`
+  // wrapper's payload-coercion only requires *an object*, which an
+  // ArrayBuffer/Buffer already is, so it passes through untouched.
+  on('audio-frame', (data) => {
+    const ctx = context();
+    if (!ctx || !micSession || !ctx.room.config.chatEnabled || !ROUND_PHASES.includes(ctx.room.phase)) return;
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
+    if (buf.length === 0 || buf.length > AUDIO_FRAME_MAX_BYTES || buf.length % 2 !== 0) return;
+    if (!allowAudioFrame()) return;
+    // Buffer.from a socket.io binary payload can land anywhere inside Node's
+    // shared pool — `buf.byteOffset` is not guaranteed even, and Int16Array
+    // requires that. `new Uint8Array(buf)` copies into a fresh, zero-offset
+    // ArrayBuffer (constructing a typed array from another one always
+    // copies), so the Int16Array view over *that* is safe regardless of where
+    // the original Buffer came from.
+    micSession.pushFrame(new Int16Array(new Uint8Array(buf).buffer));
+  });
+
   on('skip-drawer', (_data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
@@ -603,6 +864,7 @@ export function registerSocketHandlers(io, socket) {
     rooms.destroyRoom(code);
     bots.forgetRoom(code);
     suggestions.forgetRoom(code);
+    forgetVoiceBuffer(code);
     persist.deleteRoom(code);
     broadcastLobbies(io); // it just stopped being joinable
     ack?.({ ok: true });
@@ -650,6 +912,7 @@ export function registerSocketHandlers(io, socket) {
       rooms.destroyRoom(ctx.room.code);
       bots.forgetRoom(ctx.room.code);
       suggestions.forgetRoom(ctx.room.code);
+      forgetVoiceBuffer(ctx.room.code);
       persist.deleteRoom(ctx.room.code);
       broadcastLobbies(io);
       return ack?.({ ok: true });
@@ -661,6 +924,7 @@ export function registerSocketHandlers(io, socket) {
   });
 
   socket.on('disconnect', () => {
+    closeMicSession();
     const ctx = context();
     if (!ctx) return;
     ctx.player.connected = false;

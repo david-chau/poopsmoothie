@@ -1,6 +1,10 @@
 import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from 'react';
 import { socket, loadIdentity, saveIdentity, clearIdentity, wireAutoRejoin, emitAck, type Identity } from './socket';
-import type { GameState, Slip } from './types';
+import type { ChatMessage, GameState, Slip } from './types';
+
+/** Mirrors the server's cap (server/events.js chat-send) so a very chatty
+ *  round can never grow the array without bound between full state syncs. */
+const CHAT_HISTORY_CAP = 200;
 
 interface DrawnSlip {
   slip: Slip;
@@ -56,6 +60,19 @@ export function GameProvider({ children }: { children: ReactNode }) {
     function onSlipRevealed(payload: DrawnSlip) {
       setMySlip(payload);
     }
+    // Chat is deliberately NOT part of the full 'state' broadcast cadence (see
+    // server/events.js chat-send) — a full state+lobbies rebroadcast per line of
+    // text is too heavy. So new messages arrive on their own event and are
+    // appended locally; the next real 'state' event still replaces round.chat
+    // wholesale with the server's authoritative array (e.g. the empty array a
+    // new round starts with), so nothing here can outlive a round boundary.
+    function onChatMessage(msg: ChatMessage) {
+      setState((prev) => {
+        if (!prev) return prev;
+        const next = [...prev.round.chat, msg].slice(-CHAT_HISTORY_CAP);
+        return { ...prev, round: { ...prev.round, chat: next } };
+      });
+    }
     function onRejoinFailed() {
       identityRef.current = null;
       setIdentity(null);
@@ -74,12 +91,14 @@ export function GameProvider({ children }: { children: ReactNode }) {
 
     socket.on('state', onState);
     socket.on('slip-revealed', onSlipRevealed);
+    socket.on('chat-message', onChatMessage);
     socket.on('room-closed', onRoomClosed);
     wireAutoRejoin(onRejoinFailed);
 
     return () => {
       socket.off('state', onState);
       socket.off('slip-revealed', onSlipRevealed);
+      socket.off('chat-message', onChatMessage);
       socket.off('room-closed', onRoomClosed);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

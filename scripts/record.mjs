@@ -91,8 +91,15 @@ async function main() {
     await page.getByRole('button', { name: /Start a new game/ }).click();
     await page.getByRole('heading', { name: 'Team Blue' }).waitFor();
     await page.waitForTimeout(500);
-    await page.getByRole('button', { name: /Fill to 4/ }).click();
-    await page.waitForTimeout(1200); // bots arrive one by one
+    // +1 three times, not "Fill to 4" — bots.js has no artificial stagger
+    // between joins (nor should it, for real players), so clicking the bulk
+    // button lands all three in one burst and the gif is mostly a static
+    // already-full table. Clicking one at a time is what actually shows the
+    // table filling up rather than just jumping to "full".
+    for (let i = 0; i < 3; i++) {
+      await page.getByRole('button', { name: '🤖 +1' }).click();
+      await page.waitForTimeout(500);
+    }
 
     mark('cut');
     await page.getByRole('button', { name: /^Start game/ }).click();

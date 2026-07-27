@@ -35,6 +35,39 @@ export const socket: Socket = io();
 // not inside a component that might not be mounted.
 socket.on('are-you-there', (ack?: () => void) => ack?.());
 
+// Whether *this server* has voice capture available (models loaded — see
+// server/index.js), and which ASR languages it actually loaded, sent once
+// right on connection. Server-wide, not per-room, so these live at module
+// scope like everything else on this page rather than inside GameState
+// (which is one room's state).
+let voiceAvailable = false;
+let voiceLanguages: string[] = [];
+const voiceListeners = new Set<(v: boolean) => void>();
+const voiceLanguageListeners = new Set<(langs: string[]) => void>();
+socket.on('server-info', (info: { voiceAvailable?: boolean; voiceLanguages?: string[] }) => {
+  voiceAvailable = !!info.voiceAvailable;
+  voiceLanguages = info.voiceLanguages ?? [];
+  voiceListeners.forEach((fn) => fn(voiceAvailable));
+  voiceLanguageListeners.forEach((fn) => fn(voiceLanguages));
+});
+
+/** Fires immediately with the current value, then again on every change
+ *  (e.g. a reconnect to a different process). Returns an unsubscribe fn. */
+export function onVoiceAvailable(fn: (available: boolean) => void): () => void {
+  fn(voiceAvailable);
+  voiceListeners.add(fn);
+  return () => voiceListeners.delete(fn);
+}
+
+/** Which voice languages this server actually has models loaded for — e.g.
+ *  `['en']` on a box that only fetched the English model. Same fire-now,
+ *  fire-on-change shape as onVoiceAvailable. */
+export function onVoiceLanguages(fn: (languages: string[]) => void): () => void {
+  fn(voiceLanguages);
+  voiceLanguageListeners.add(fn);
+  return () => voiceLanguageListeners.delete(fn);
+}
+
 /** gap #14: re-fires on every transport reconnect (new sid), not just first mount. */
 export function wireAutoRejoin(onFailed: () => void) {
   socket.on('connect', () => {

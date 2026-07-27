@@ -85,6 +85,13 @@ the bare IP. Also check they're on the same wifi band/network (guest wifi is
 usually isolated from the main one), and that macOS didn't firewall Docker
 (System Settings → Network → Firewall → Options).
 
+**For voice chat specifically:** browsers only allow microphone access on a
+secure origin, so the mic toggle only shows up over `https://192.168.x.x:4322`
+(port **4322**, not 4321). Self-signed certificate — the browser will warn
+once per device; that's expected for a self-hosted server, not a sign
+anything's wrong. Text chat, and the rest of the game, work fine on the plain
+`http://` URL; only the mic needs the `https` one.
+
 (Building from source instead of pulling the image? See
 [Option A](#option-a--build-on-the-host) below.)
 
@@ -166,6 +173,27 @@ Beyond the Quick start walkthrough above, good to know while hosting:
 - **Guessed this round** is listed for everyone during play, with who got each
   one. Scoped to the current round on purpose: the pile resets each round and
   remembering the earlier rounds' words is the game.
+- **Chat & voice (beta)** — off by default, a lobby setting the host turns on
+  per room (**Chat & voice (beta)** checkbox, alongside Hot join). Everything
+  below only exists once it's on.
+- **Chat** on the turn screen is a live audit trail for the current round only
+  ("I said Titanic before the buzzer") — cleared when the next round starts.
+  Names are team-colored, the drawer gets a badge, and you can filter to
+  **All**, **My team**, or **Drawer** so the other team's chatter doesn't
+  flood the log.
+- **Voice chat** (open mic — no push-to-talk): tap 🎤 to let the table hear
+  you, transcribed automatically into the same chat log (🎤 marks a voice
+  line). It needs `https` — see below — and only appears once the server
+  actually has the speech models loaded. **Voice language** (English or 中文,
+  in lobby settings, only once Chat & voice is on) picks which one — one at a
+  time, never both, since mixing them made transcription noticeably worse. If
+  several phones catch the same thing said out loud, only one line shows up,
+  attributed to whoever said it — not whichever phone happened to catch it
+  loudest. **Voice ID** (next to the mic toggle) lets you record a short
+  sample once so you're still credited correctly even on someone else's
+  phone; skipping it is fine, chat still works, it's just occasionally
+  attributed to whoever's phone caught it. Only text is ever stored — raw
+  audio is discarded the instant it's transcribed/matched.
 - **Sound.** Correct guesses, passes, submitting your words, someone joining,
   the last 10 seconds of a turn (soft, firming up for the last 3), time-up,
   each round closing, and a fanfare on the final scores. Room-wide moments play off the broadcast state,
@@ -426,7 +454,8 @@ sanitizing `publicState()` first.
 
 ```
 server/
-  index.js       express + socket.io bootstrap, serves SPA, boot recovery
+  index.js       express + socket.io bootstrap, serves SPA, boot recovery,
+                 https listener (mic prerequisite), voice model loading
   rooms.js       room/player CRUD, 4-char codes, team balance, host transfer
   game.js        round/turn state machine — pool, timers, pass/skip, host
                  patch controls (revert, set-drawer, set-slip-scorer); scores
@@ -436,10 +465,14 @@ server/
   suggestions.js word/phrase pool for the 🎲 buttons, deduped against the room
   bot.js         bot factory — a socket.io client that plays itself
   bots.js        host-spawned bot lifecycle, one-time join tokens, teardown
+  tls.js         self-signed cert, generated once and persisted to DATA_DIR
+  stt.js         sherpa-onnx wrapper: VAD -> streaming ASR -> speaker embedding
+  arbiter.js     cross-device dedup (same shout, several phones) + voice match
 
 client/src/
   GameContext.tsx   socket connection, rejoin, clock-skew offset, game state
   socket.ts         socket.io client singleton + identity persistence
+  useOpenMic.ts     getUserMedia -> AudioWorklet -> 16kHz frames over the socket
   types.ts          shared types, team/round label+color/icon maps
   screens/          Landing, Lobby, Writing, Turn, RoundIntermission, Scores
   alert.ts          all game sounds + vibration (Web Audio, no asset shipped)
@@ -447,7 +480,11 @@ client/src/
                     reveal), FoldingSlip (fold into the box), Confetti,
                     RulesDialog,
                     PlayerName, MyNameBadge, AdminDrawer, Toast,
-                    SoundToggle, GameSounds
+                    SoundToggle, GameSounds, TurnChat (text + voice audit
+                    trail), VoiceEnroll (one-shot voiceprint recording)
+
+public/
+  audio-worklet.js  mic downsampling — plain script, deliberately unbundled
 ```
 
 **No room passwords, deliberately.** Rooms are listed openly on the landing
@@ -529,3 +566,66 @@ What *is* hardened, because these bite even on a friendly LAN:
   depth-sorts the halves, making `z-index` inert and leaving the flap to flicker
   and settle *under* the half it folds onto. All of it is skipped under
   `prefers-reduced-motion`.
+
+**Voice chat pipeline**, in order:
+
+1. **Capture** (client): `getUserMedia` (open mic, no push-to-talk) feeds an
+   `AudioWorklet` (`public/audio-worklet.js`) that downsamples whatever rate
+   the device gives to 16kHz mono Int16 and streams ~250ms frames over the
+   existing socket as `audio-frame` — `.volatile.emit`, so a frame queued
+   behind a dropped connection is discarded rather than delivered stale.
+   Kept short deliberately: whatever's left in the buffer when someone stops
+   talking waits for the next full frame before the server's VAD even sees
+   the silence that ends the segment — that tail wait was the visible
+   majority of the delay before a line showed up.
+2. **VAD** (server, per socket): silero-vad gates everything downstream —
+   ASR only runs on segments it flags as actual speech, which is most of the
+   CPU story on a NAS of uncertain power. Each segment is widened with ~300ms
+   of **pre-roll** audio the segmenter keeps in its own rolling buffer: the
+   VAD marks speech from where it is *confident*, which reliably clips a
+   quiet leading word ("The Tooth Fairy" came back as "Tooth fairy" until
+   this was added). Tuning the VAD's thresholds instead was tried and
+   rejected — the only value that recovered the word was also the most eager
+   to call a cough speech.
+3. **ASR** (server, shared across the room): transcribes each segment in
+   whichever single language the room picked (**Voice language** in lobby
+   settings — English or 中文, never both). A combined bilingual model was
+   tried first and dropped: trained on Mandarin/English code-switching
+   speech, it was biased toward hearing Chinese even from a pure-English
+   speaker — no config fixed it, only one single-language model per option
+   did. Because the VAD segments *first*, only ever handing over a complete
+   utterance, these are **offline** models rather than streaming ones: they
+   are markedly better on the short phrases people actually say across a
+   table, which is where a streaming zipformer turned "The Tooth Fairy" into
+   "THE TWO FA". Runs behind `TranscriptionQueue`, a server-wide concurrency
+   cap (`PS_STT_MAX_CONCURRENT`) — excess load sheds the oldest queued
+   segment rather than letting transcription lag pile up.
+
+   Which model each language uses is a Dockerfile concern, not a code one:
+   every language directory carries a `model.json` naming its `kind`
+   (`offline`/`online`), so swapping in a lighter model is a URL change. The
+   English default (NeMo parakeet-tdt-0.6b) is the most accurate option
+   tested and also the heaviest — **`npm run stt-bench` on the actual host is
+   the deciding vote**, and the Dockerfile names the lighter fallback inline.
+4. **Cross-device dedup** (`server/arbiter.js`): the same shout often lands on
+   several phones. Utterances are held ~0.4s (`PS_VOICE_SETTLE_MS`), clustered
+   by time overlap + text similarity, and only the best capture (loudest, then
+   longest) becomes one chat line — this alone fixes the common case, since
+   the true speaker's own phone usually also heard them. This is pure added
+   latency for the (common) single-speaker case, so it's kept short — long
+   enough to absorb two phones' VAD/network jitter, not much more.
+5. **Voice match** (optional, per player): a speaker-embedding model fingerprints
+   each utterance and compares it against anyone who recorded a sample via the
+   **Voice ID** button. A confident match (`PS_VOICE_EMBEDDING_THRESHOLD`)
+   overrides step 4's guess — this is what's actually needed when the true
+   speaker's *own* phone never captured them at all (pocket, far corner of the
+   room), not just when several phones did.
+
+Only the transcribed **text** and (transiently, in memory, for the ~0.4s
+settle window) a numeric voice fingerprint ever exist — raw audio is never
+written to disk and is discarded the instant each step above is done with it.
+Everything server-side is optional and fails soft: no model files, no HTTPS
+cert, or a threshold nobody clears just means that layer sits out — text chat
+never breaks because of it (`server/index.js` logs which pieces loaded at
+boot). `npm run stt-bench -- /path/to/models` measures real decode speed on
+whatever box will actually host it, before it needs to work at a party.

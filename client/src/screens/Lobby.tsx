@@ -1,8 +1,10 @@
-import { useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { useGame } from '../GameContext';
-import { emitAck } from '../socket';
+import { emitAck, onVoiceLanguages } from '../socket';
 import { copyText } from '../lib';
 import { TEAM_LABELS, TEAM_CLASS, ROUND_LABELS, ROUND_ICONS, type Team } from '../types';
+
+const VOICE_LANGUAGE_LABELS: Record<string, string> = { en: 'English', zh: '中文' };
 
 const SKIP_ROUNDS = ['ROUND1', 'ROUND2', 'ROUND3'] as const;
 type SkipRound = (typeof SKIP_ROUNDS)[number];
@@ -20,6 +22,8 @@ export default function Lobby() {
   // These only sync TO the server on blur.
   const [wordsInput, setWordsInput] = useState(() => String(gameState?.config.wordsPerPlayer ?? 5));
   const [turnInput, setTurnInput] = useState(() => String(gameState?.config.turnSeconds ?? 60));
+  const [voiceLanguages, setVoiceLanguages] = useState<string[]>([]);
+  useEffect(() => onVoiceLanguages(setVoiceLanguages), []);
   if (!gameState || !me) return null;
   // narrowed locals so closures below (TS can't narrow across nested functions) stay non-null
   const state = gameState;
@@ -41,6 +45,8 @@ export default function Lobby() {
       wordsPerPlayer: number;
       turnSeconds: number;
       hotJoin: boolean;
+      chatEnabled: boolean;
+      voiceLanguage: string;
       allowSkip: Partial<Record<SkipRound, boolean>>;
     }>,
   ) {
@@ -200,6 +206,37 @@ export default function Lobby() {
               Latecomers can join after the game starts
             </label>
           </label>
+          <label className="field">
+            <span>Chat &amp; voice (beta)</span>
+            <label className="skip-toggle">
+              <input
+                type="checkbox"
+                checked={state.config.chatEnabled}
+                onChange={() => updateConfig({ chatEnabled: !state.config.chatEnabled })}
+              />
+              Live audit trail on the turn screen — text, plus open-mic voice
+              where the server supports it
+            </label>
+          </label>
+          {state.config.chatEnabled && voiceLanguages.length > 0 && (
+            <label className="field">
+              <span>Voice language</span>
+              <div className="skip-toggle-group">
+                {voiceLanguages.map((lang) => (
+                  <label key={lang} className="skip-toggle">
+                    <input
+                      type="radio"
+                      name="voiceLanguage"
+                      checked={state.config.voiceLanguage === lang}
+                      onChange={() => updateConfig({ voiceLanguage: lang })}
+                    />
+                    {VOICE_LANGUAGE_LABELS[lang] ?? lang}
+                  </label>
+                ))}
+              </div>
+              <span className="field-hint">One language at a time — mixed transcription got inaccurate.</span>
+            </label>
+          )}
           <div className="field">
             <span>Allow pass</span>
             <div className="skip-toggle-group">

@@ -6,6 +6,7 @@ import { tick, timeUp, primeAudio, passed } from '../alert';
 import PaperSlip from '../components/PaperSlip';
 import PlayerName from '../components/PlayerName';
 import AdminDrawer from '../components/AdminDrawer';
+import TurnChat from '../components/TurnChat';
 
 interface FlashEvent {
   id: number;
@@ -196,6 +197,8 @@ export default function Turn() {
           </ul>
         </div>
       )}
+
+      {state.config.chatEnabled && <TurnChat />}
 
       {isHost && (
         <div className="host-escape-hatches">

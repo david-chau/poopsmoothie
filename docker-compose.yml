@@ -4,6 +4,12 @@ services:
     container_name: poopsmoothie
     ports:
       - "4321:4321"
+      - "4322:4322" # https — needed for mic capture (getUserMedia requires a secure context)
     volumes:
       - ./data:/data
     restart: unless-stopped
+    environment:
+      - PS_STT_MAX_CONCURRENT=${PS_STT_MAX_CONCURRENT:-}
+      - PS_STT_THREADS=${PS_STT_THREADS:-}
+      - PS_VOICE_SETTLE_MS=${PS_VOICE_SETTLE_MS:-}
+      - PS_VOICE_EMBEDDING_THRESHOLD=${PS_VOICE_EMBEDDING_THRESHOLD:-}

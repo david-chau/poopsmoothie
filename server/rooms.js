@@ -34,10 +34,19 @@ export function newRoom() {
     // one-word clues don't leave much room for "come back to this one later".
     // hotJoin: latecomers can drop into a game already under way. Off means
     // the doors shut the moment the game starts (the original behaviour).
+    // chatEnabled: off by default — the audit-trail chat (and open-mic voice
+    // on top of it) is a newer, heavier feature than the core game; a host
+    // opts in per room rather than every table getting it unasked.
+    // voiceLanguage: one language, never mixed — a single bilingual ASR model
+    // was tried and dropped for cross-contaminating English with Chinese
+    // (see server/stt.js). Only meaningful when chatEnabled and the server
+    // actually has that language's model loaded.
     config: {
       wordsPerPlayer: 5,
       turnSeconds: 60,
       hotJoin: true,
+      chatEnabled: false,
+      voiceLanguage: 'en',
       allowSkip: { ROUND1: true, ROUND2: true, ROUND3: false },
     },
     players: new Map(), // playerId -> { id, secret, name, team, connected, socketId }
@@ -63,6 +72,8 @@ export function newRoom() {
       awaitingReady: false,
       ready: [], // playerId[]
       timeoutHandle: null,
+      // audit trail for the live round only — see game.js startRound/resetForRematch
+      chat: [], // { id, playerId, name, team, wasDrawer, via, text, at }[]
     },
     // both derived from pool[].scoredBy by game.recomputeScores — cached here
     // only so the broadcast payload stays cheap

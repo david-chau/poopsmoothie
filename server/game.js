@@ -105,6 +105,9 @@ export function beginRound1(room) {
 function startRound(room, { toggleTeam = false } = {}) {
   room.round.remaining = shuffle(Object.keys(room.pool));
   room.round.guessed = [];
+  // audit trail is scoped to the live round on purpose (see rooms.js) — a new
+  // round is a clean slate for it same as for the guessed pile
+  room.round.chat = [];
   advanceToNextDrawer(room, { toggleTeam });
 }
 
@@ -474,6 +477,7 @@ export function resetForRematch(room) {
     awaitingReady: false,
     ready: [],
     timeoutHandle: null,
+    chat: [], // spread above carries the old round's chat forward otherwise
   };
 }
 

@@ -11,6 +11,15 @@ services:
     container_name: poopsmoothie
     ports:
       - "4321:4321"
+      - "4322:4322" # https — needed for mic capture (getUserMedia requires a secure context)
     volumes:
       - ./data:/data
     restart: unless-stopped
+    environment:
+      # unset by default (falls back to server/index.js's own defaults) — set
+      # these on the NAS after running `node scripts/stt-bench.mjs` against
+      # this same image, if the defaults don't fit this box's CPU
+      - PS_STT_MAX_CONCURRENT=${PS_STT_MAX_CONCURRENT:-}
+      - PS_STT_THREADS=${PS_STT_THREADS:-}
+      - PS_VOICE_SETTLE_MS=${PS_VOICE_SETTLE_MS:-}
+      - PS_VOICE_EMBEDDING_THRESHOLD=${PS_VOICE_EMBEDDING_THRESHOLD:-}
