@@ -369,7 +369,10 @@ PS_IMAGE=ghcr.io/david-chau/poopsmoothie:20260725-1210 \
   docker compose -f docker-compose.prod.yml up -d
 ```
 
-**Publishing your own build** (only needed if you've changed the code):
+**Publishing:** every push to `master` builds both arches and pushes `:latest`
++ a timestamp tag automatically ([.github/workflows/publish.yml](.github/workflows/publish.yml)),
+using the repo's own `GITHUB_TOKEN` — no secrets to set up. To publish from a
+fork or a different account, or to push a build without merging to `master`:
 
 ```sh
 # once: auth (classic token with write:packages)
