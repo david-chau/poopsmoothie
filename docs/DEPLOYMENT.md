@@ -67,6 +67,26 @@ Runs from any directory.
 To pull without `docker login`, the GHCR package must be **public** (GitHub →
 your profile → Packages → poopsmoothie → Package settings → visibility).
 
+## Voice models
+
+The published/built image does **not** include the voice-chat models
+(VAD, ASR, speaker embedding) — they'd add ~100MB–1GB+ to every pull for a
+beta feature most games won't turn on. Both compose files already bind-mount
+`./models:/app/models:ro`; an empty/missing `./models` just means voice chat
+stays off, text chat and the rest of the game are unaffected.
+
+To enable it, fetch the models onto the host once, next to `docker-compose.yml`:
+
+```sh
+./scripts/fetch-models.sh                          # default English model (most accurate)
+EN_MODEL=fast-conformer ./scripts/fetch-models.sh   # lighter, for a weaker CPU
+```
+
+Safe to re-run — each piece is skipped if already present. Run
+[`npm run stt-bench`](DEVELOPMENT.md#tests) against the host afterward to
+check it can actually keep up in real time; swap to `fast-conformer` if not.
+Model internals: [Architecture](ARCHITECTURE.md#voice-chat-pipeline).
+
 ## Data persistence
 
 Room state persists to `./data/rooms/*.json` on the host — survives a

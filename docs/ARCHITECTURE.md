@@ -220,12 +220,15 @@ In order:
    cap (`PS_STT_MAX_CONCURRENT`) — excess load sheds the oldest queued
    segment rather than letting transcription lag pile up.
 
-   Which model each language uses is a Dockerfile concern, not a code one:
-   every language directory carries a `model.json` naming its `kind`
-   (`offline`/`online`), so swapping in a lighter model is a URL change. The
-   English default (NeMo parakeet-tdt-0.6b) is the most accurate option
-   tested and also the heaviest — **`npm run stt-bench` on the actual host is
-   the deciding vote**, and the Dockerfile names the lighter fallback inline.
+   Which model each language uses is a `scripts/fetch-models.sh` concern, not
+   a code one: every language directory carries a `model.json` naming its
+   `kind` (`offline`/`online`), so swapping in a lighter model is a URL
+   change, not a code change. The English default (NeMo parakeet-tdt-0.6b) is
+   the most accurate option tested and also the heaviest — **`npm run
+   stt-bench` on the actual host is the deciding vote**; `EN_MODEL=fast-conformer
+   ./scripts/fetch-models.sh` switches to the lighter fallback. Models are
+   fetched onto the host and bind-mounted into the container rather than
+   baked into the image — see [Deployment](DEPLOYMENT.md#voice-models).
 4. **Cross-device dedup** (`server/arbiter.js`): the same shout often lands on
    several phones. Utterances are held ~0.4s (`PS_VOICE_SETTLE_MS`), clustered
    by time overlap + text similarity, and only the best capture (loudest, then

@@ -7,6 +7,7 @@ services:
       - "4322:4322" # https — needed for mic capture (getUserMedia requires a secure context)
     volumes:
       - ./data:/data
+      - ./models:/app/models:ro # ./scripts/fetch-models.sh populates this; empty is fine (voice chat just stays off)
     restart: unless-stopped
     environment:
       - PS_STT_MAX_CONCURRENT=${PS_STT_MAX_CONCURRENT:-}

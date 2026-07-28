@@ -14,6 +14,7 @@ services:
       - "4322:4322" # https — needed for mic capture (getUserMedia requires a secure context)
     volumes:
       - ./data:/data
+      - ./models:/app/models:ro # ./scripts/fetch-models.sh populates this; empty is fine (voice chat just stays off)
     restart: unless-stopped
     environment:
       # unset by default (falls back to server/index.js's own defaults) — set
