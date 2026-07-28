@@ -10,9 +10,9 @@ No cloud, no accounts — everyone just opens a link on the same wifi.
 |---|---|---|
 | ![Cutting the sheet into slips](docs/media/cut.gif) | ![Writing on the slips](docs/media/writing.gif) | ![Folding them into the box](docs/media/submit.gif) |
 
-| Your turn | The table fills up |
-|---|---|
-| ![Unfolding a slip and guessing](docs/media/turn.gif) | ![The lobby, with bots](docs/media/lobby.gif) |
+| Your turn | Lobby | Final scores |
+|---|---|---|
+| ![Unfolding a slip and guessing](docs/media/turn.gif) | ![The lobby, with bots](docs/media/lobby.gif) | ![Final scores after three rounds](docs/media/scores.gif) |
 
 <sub>All recorded automatically — `npm run record` drives a real browser through a
 whole game while bots play the other seats. See [Recording the GIFs](#recording-the-gifs).</sub>

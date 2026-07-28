@@ -30,6 +30,10 @@ const WIDTH = 380;
 const marks = [];
 let t0 = 0;
 const mark = (name) => marks.push({ name, at: Date.now() - t0 });
+// A boundary with no name: closes off the previous named clip without
+// opening a new tracked gif for whatever comes next — for stretches (bots
+// autoplaying a round with nobody to watch) that aren't worth a README image.
+const skip = () => mark(null);
 
 function have(cmd) {
   try {
@@ -90,6 +94,11 @@ async function main() {
     mark('lobby');
     await page.getByRole('button', { name: /Start a new game/ }).click();
     await page.getByRole('heading', { name: 'Team Blue' }).waitFor();
+    // 1 word per player — 4 total slips, so a round finishes in a handful of
+    // clicks instead of 20. Rounds 2 and 3 need to actually complete (bots
+    // autoplaying) to reach the scores screen later in this recording.
+    await page.getByLabel('Words per player').fill('1');
+    await page.getByLabel('Words per player').press('Enter');
     await page.waitForTimeout(500);
     // +1 three times, not "Fill to 4" — bots.js has no artificial stagger
     // between joins (nor should it, for real players), so clicking the bulk
@@ -124,6 +133,38 @@ async function main() {
       await page.waitForTimeout(1500); // let each slip finish its trip
     }
 
+    skip(); // nothing here is worth a README image — real gameplay resumes off-camera
+    // finish round 1 (the passed slip needs one more correct to empty the bag).
+    // Same 1500ms pacing as the demo clicks above — the correct/pass flash and
+    // paper-fold chain takes ~1s, and clicking too soon catches the button
+    // mid-animation, where `isVisible()` can read false and end this loop
+    // before the round has actually finished.
+    while (await page.getByRole('button', { name: 'Correct!' }).isVisible().catch(() => false)) {
+      await page.getByRole('button', { name: 'Correct!' }).click();
+      await page.waitForTimeout(1500);
+    }
+    // rounds 2 and 3: a bot draws both (team rotation lands on Wren, then
+    // Nadia, with this exact 4-player table), so bots play the whole thing
+    // out unattended — "Start the round now" is the host's own escape from
+    // the ready gate (a <button> styled as a link), used here just to skip
+    // the wait, not to cut the round short
+    const startRoundNow = page.getByRole('button', { name: /Start the round now/ });
+    async function skipReadyGateAndWaitForNext() {
+      await startRoundNow.click();
+      // wait for it to disappear (the round actually opened) before waiting
+      // for it to come back (the round finished) — waiting for "visible" alone
+      // right after the click can resolve instantly against the pre-click
+      // render, one React tick before the click's effect actually lands
+      await startRoundNow.waitFor({ state: 'hidden', timeout: 10_000 });
+      await startRoundNow.waitFor({ state: 'visible', timeout: 30_000 });
+    }
+    await skipReadyGateAndWaitForNext(); // round 1 -> round 2, then wait for round 2 to finish
+    await startRoundNow.click(); // round 2 -> round 3 (no gate reappears after round 3 — game ends instead)
+    await page.getByRole('heading', { name: 'Final scores' }).waitFor({ timeout: 30_000 });
+
+    mark('scores');
+    await page.waitForTimeout(2600); // fanfare + confetti
+
     mark('end');
     await page.waitForTimeout(400);
     await context.close(); // flushes the video file
@@ -151,6 +192,7 @@ async function main() {
 
     for (let i = 0; i < marks.length - 1; i++) {
       const { name, at } = marks[i];
+      if (!name) continue; // an unnamed boundary — see `skip()`
       const duration = (marks[i + 1].at - at) / 1000;
       const gif = path.join(OUT, `${name}.gif`);
       // two passes: build a palette from the clip, then map to it. One-pass GIF
