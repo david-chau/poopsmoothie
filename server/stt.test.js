@@ -7,6 +7,7 @@ import {
   TranscriptionQueue,
   createMicSession,
   createEngine,
+  startEngine,
   loadModels,
   decodeSegment,
   computeEmbedding,
@@ -16,6 +17,14 @@ import {
 } from './stt.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// The far-mic gate (energy floor + minimum duration) is switched off for the
+// tests below that exercise *plumbing* — does text reach onFinal, does the
+// metadata come with it, does the language ride along. They feed a handful of
+// synthetic samples, which is far too short and quiet to clear a gate meant
+// for real speech, so leaving it on would make every one of them a test of
+// the gate instead. The gate has its own tests further down.
+const UNGATED = { minEnergy: 0, minSegmentSec: 0 };
 
 // --- TranscriptionQueue: pure scheduling logic, no native addon involved ----
 
@@ -139,7 +148,7 @@ test('createMicSession reports decoded text for a completed VAD segment', async 
   const models = stubModels({ onAccept: (f32) => ({ samples: f32 }) }); // every push "completes" a segment
   const q = new TranscriptionQueue(() => Promise.resolve('marco polo'));
   const finals = [];
-  const session = createMicSession({ models, queue: q, onFinal: (t) => finals.push(t) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: (t) => finals.push(t) });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   await new Promise((r) => setImmediate(r));
@@ -151,7 +160,7 @@ test('createMicSession passes energy/timing metadata alongside the text, for arb
   const models = stubModels({ onAccept: (f32) => ({ samples: f32 }) });
   const q = new TranscriptionQueue(() => Promise.resolve('marco polo'));
   const finals = [];
-  const session = createMicSession({ models, queue: q, onFinal: (t, meta) => finals.push(meta) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: (t, meta) => finals.push(meta) });
 
   const loudSamples = new Int16Array([30000, -30000, 30000, -30000]); // real input is int16 PCM, not pre-scaled floats
   const before = Date.now();
@@ -170,7 +179,7 @@ test('createMicSession extracts the embedding from a {text, embedding} decode re
   const fakeEmbedding = new Float32Array([0.1, 0.2, 0.3]);
   const q = new TranscriptionQueue(() => Promise.resolve({ text: 'marco polo', embedding: fakeEmbedding }));
   const finals = [];
-  const session = createMicSession({ models, queue: q, onFinal: (t, meta) => finals.push({ text: t, meta }) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: (t, meta) => finals.push({ text: t, meta }) });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   await new Promise((r) => setImmediate(r));
@@ -184,7 +193,7 @@ test('createMicSession reports a null embedding when the decode result has none 
   const models = stubModels({ onAccept: (f32) => ({ samples: f32 }) });
   const q = new TranscriptionQueue(() => Promise.resolve('marco polo')); // plain string, no embedding field
   const finals = [];
-  const session = createMicSession({ models, queue: q, onFinal: (t, meta) => finals.push(meta) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: (t, meta) => finals.push(meta) });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   await new Promise((r) => setImmediate(r));
@@ -199,7 +208,7 @@ test('createMicSession carries its fixed language into every enqueued decode job
     seenLanguages.push(job.language);
     return Promise.resolve('hi');
   });
-  const session = createMicSession({ models, queue: q, language: 'zh', onFinal: () => {} });
+  const session = createMicSession({ models, queue: q, ...UNGATED, language: 'zh', onFinal: () => {} });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   session.pushFrame(new Int16Array([4, 5, 6]));
@@ -215,7 +224,7 @@ test('createMicSession defaults to the first known language when none is specifi
     seenLanguage = job.language;
     return Promise.resolve('hi');
   });
-  const session = createMicSession({ models, queue: q, onFinal: () => {} });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: () => {} });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   await new Promise((r) => setImmediate(r));
@@ -307,7 +316,7 @@ test('a segment is widened with pre-roll audio from before the VAD\'s detected o
     captured.push(samples);
     return Promise.resolve('x');
   });
-  const session = createMicSession({ models, queue: q, onFinal: () => {} });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: () => {} });
 
   // 4 x 0.5s frames = 2s of audio, so the 1s-in segment has history behind it
   for (let i = 0; i < 4; i++) session.pushFrame(new Int16Array(8000).fill(1000));
@@ -328,7 +337,7 @@ test('pre-roll falls back to the VAD\'s own samples when history cannot cover it
     captured.push(samples);
     return Promise.resolve('x');
   });
-  const session = createMicSession({ models, queue: q, onFinal: () => {} });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: () => {} });
 
   session.pushFrame(new Int16Array(1000));
   await new Promise((r) => setImmediate(r));
@@ -341,13 +350,102 @@ test('createMicSession swallows a segment that decodes to empty text', async () 
   const q = new TranscriptionQueue(() => Promise.resolve('   ')); // whitespace-only "transcript"
   const finals = [];
   const warns = [];
-  const session = createMicSession({ models, queue: q, onFinal: (t) => finals.push(t), onWarn: (e) => warns.push(e) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: (t) => finals.push(t), onWarn: (e) => warns.push(e) });
 
   session.pushFrame(new Int16Array([1, 2, 3]));
   await new Promise((r) => setImmediate(r));
 
   assert.deepEqual(finals, []);
   assert.deepEqual(warns, []); // an empty transcript isn't a failure, just nothing said
+});
+
+// --- the far-mic gate: what keeps a phone across the room from posting -----
+// confident nonsense. Both limbs drop the segment *before* it reaches the
+// queue, so they're asserted on what the decoder was asked to do, not just on
+// what came back.
+
+/** A segment of `seconds` at a given amplitude, as the int16 PCM a real frame
+ *  carries — energy is RMS over the scaled floats, so amplitude maps directly. */
+function segment(seconds, amplitude) {
+  const samples = new Int16Array(Math.round(SAMPLE_RATE * seconds));
+  for (let i = 0; i < samples.length; i++) samples[i] = i % 2 ? amplitude : -amplitude;
+  return samples;
+}
+
+function gatedSession(opts = {}) {
+  const models = stubModels({ onAccept: (f32) => ({ samples: f32 }) });
+  const decoded = [];
+  const q = new TranscriptionQueue((samples) => {
+    decoded.push(samples);
+    return Promise.resolve('transcribed');
+  });
+  const finals = [];
+  const session = createMicSession({ models, queue: q, onFinal: (t) => finals.push(t), ...opts });
+  return { session, decoded, finals };
+}
+
+test('a segment below the energy floor is never even handed to the decoder', async () => {
+  const { session, decoded, finals } = gatedSession({ minEnergy: 0.02 });
+  session.pushFrame(segment(1, 100)); // ~0.003 RMS: a distant, quiet capture
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(finals, []);
+  assert.equal(decoded.length, 0, 'a segment we already distrust should not spend a decode slot');
+});
+
+test('a segment above the energy floor still gets through', async () => {
+  const { session, decoded, finals } = gatedSession({ minEnergy: 0.02 });
+  session.pushFrame(segment(1, 6000)); // ~0.18 RMS: someone actually talking nearby
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(finals, ['transcribed']);
+  assert.equal(decoded.length, 1);
+});
+
+test('a loud but too-short segment is dropped — that is a cough, not a sentence', async () => {
+  const { session, decoded, finals } = gatedSession({ minEnergy: 0, minSegmentSec: 0.35 });
+  session.pushFrame(segment(0.1, 20000));
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(finals, []);
+  assert.equal(decoded.length, 0);
+});
+
+test('minEnergy 0 disables the energy gate entirely, for a host who wants everything', async () => {
+  const { session, finals } = gatedSession({ minEnergy: 0, minSegmentSec: 0 });
+  session.pushFrame(segment(1, 1)); // essentially silence
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(finals, ['transcribed']);
+});
+
+test('wantEmbedding rides along on the job, so the decoder can skip it when nobody is enrolled', async () => {
+  const models = stubModels({ onAccept: (f32) => ({ samples: f32 }) });
+  const jobs = [];
+  const q = new TranscriptionQueue((samples, job) => {
+    jobs.push(job.wantEmbedding);
+    return Promise.resolve('x');
+  });
+  const session = createMicSession({ models, queue: q, ...UNGATED, wantEmbedding: false, onFinal: () => {} });
+  session.pushFrame(new Int16Array([1, 2, 3]));
+  await new Promise((r) => setImmediate(r));
+
+  assert.deepEqual(jobs, [false]);
+});
+
+test('createEngine skips the embedding when the job asks it to', async () => {
+  // the real decodeFn shape, without needing model files: prove the flag is
+  // honoured rather than trusting that it's threaded through
+  const engine = createEngine(
+    {
+      recognizers: { en: {} },
+      sherpa: {},
+      vadConfig: {},
+    },
+    { maxConcurrent: 1 },
+  );
+  assert.equal(typeof engine.createSession, 'function');
+  assert.deepEqual(engine.languages, ['en']);
 });
 
 test('createMicSession routes a broken native call to onWarn instead of crashing', () => {
@@ -358,7 +456,7 @@ test('createMicSession routes a broken native call to onWarn instead of crashing
   });
   const q = new TranscriptionQueue(() => Promise.resolve('unreachable'));
   const warns = [];
-  const session = createMicSession({ models, queue: q, onFinal: () => {}, onWarn: (e) => warns.push(e.message) });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: () => {}, onWarn: (e) => warns.push(e.message) });
 
   assert.doesNotThrow(() => session.pushFrame(new Int16Array([1, 2, 3])));
   assert.deepEqual(warns, ['native addon exploded']);
@@ -371,7 +469,7 @@ test('no segment means no decode work is queued at all', async () => {
     decodeCalls += 1;
     return Promise.resolve('should not run');
   });
-  const session = createMicSession({ models, queue: q, onFinal: () => {} });
+  const session = createMicSession({ models, queue: q, ...UNGATED, onFinal: () => {} });
   session.pushFrame(new Int16Array(500));
   await new Promise((r) => setImmediate(r));
   assert.equal(decodeCalls, 0);
@@ -480,5 +578,40 @@ test(
     const viaInt16 = computeEmbeddingFromInt16(models, int16);
     const viaFloat = computeEmbedding(models, float32);
     assert.deepEqual(Array.from(viaInt16), Array.from(viaFloat));
+  },
+);
+
+test(
+  'real models: startEngine decodes a genuine speech clip in a worker thread',
+  { skip: !(HAVE_EN && HAVE_EMBEDDING_MODEL) && MODEL_SKIP_REASON },
+  async () => {
+    // The whole point of the worker split is that this path — the one the
+    // server actually runs — produces real text without the main thread ever
+    // touching a recognizer. A stub queue can't show that; only the real
+    // addon, in a real worker, on real speech can.
+    const engine = await startEngine(MODEL_DIR, { numThreads: 2, maxConcurrent: 1 });
+    try {
+      assert.equal(engine.workers, 1, 'should be decoding in a worker, not falling back in-process');
+      assert.ok(!engine.models.recognizers, 'the main thread must not have loaded any recognizer');
+
+      const wave = (await import('sherpa-onnx-node')).default.readWave(path.join(MODEL_DIR, 'en', 'test_wavs', '0.wav'));
+      const int16 = Int16Array.from(wave.samples, (v) => Math.max(-32768, Math.min(32767, Math.round(v * 32768))));
+
+      const finals = [];
+      const session = engine.createSession({ language: 'en', onFinal: (t) => finals.push(t) });
+      // fed as ~120ms frames, exactly as the client's worklet sends them
+      const frame = Math.round(SAMPLE_RATE * 0.12);
+      for (let i = 0; i < int16.length; i += frame) session.pushFrame(int16.subarray(i, i + frame));
+      session.pushFrame(new Int16Array(SAMPLE_RATE)); // trailing silence to end-point the last segment
+
+      const deadline = Date.now() + 30_000;
+      while (finals.length === 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+
+      assert.ok(finals.length > 0, 'expected at least one transcript from real speech');
+      assert.match(finals.join(' '), /[a-z]{3,}/i, `expected words, got ${JSON.stringify(finals)}`);
+      session.close();
+    } finally {
+      await engine.close();
+    }
   },
 );

@@ -10,7 +10,7 @@ vi.mock('./socket', () => ({
   socket: { volatile: { emit: mockVolatileEmit } },
 }));
 
-import { useOpenMic } from './useOpenMic';
+import { useOpenMic, MIN_ENERGY_RANGE } from './useOpenMic';
 
 const MIC_PREF_KEY = 'poopsmoothie-mic-on';
 
@@ -66,8 +66,48 @@ test('start() requests the mic, wires the worklet, and tells the server', async 
     expect.objectContaining({ audio: expect.objectContaining({ echoCancellation: true, autoGainControl: false }) }),
   );
   expect(result.current.on).toBe(true);
-  expect(mockEmitAck).toHaveBeenCalledWith('mic-on');
+  // the device's own sensitivity floor rides along, so the server knows how
+  // strict to be for *this* mic rather than applying one room-wide guess
+  expect(mockEmitAck).toHaveBeenCalledWith('mic-on', { minEnergy: MIN_ENERGY_RANGE.default });
   expect(localStorage.getItem(MIC_PREF_KEY)).toBe('1');
+});
+
+test('an unset sensitivity preference falls back to the default, not to 0', () => {
+  // `Number(null)` is 0, which would read as a deliberate "gate everything
+  // through" and quietly disable far-mic filtering on every fresh device
+  localStorage.removeItem('poopsmoothie-mic-sensitivity');
+  const { result } = renderHook(() => useOpenMic());
+  expect(result.current.sensitivity).toBe(MIN_ENERGY_RANGE.default);
+});
+
+test('a stored sensitivity is restored, and changing it re-sends mic-on while live', async () => {
+  const { result } = renderHook(() => useOpenMic());
+  await act(async () => {
+    await result.current.start();
+  });
+  mockEmitAck.mockClear();
+
+  act(() => {
+    result.current.setSensitivity(0.03);
+  });
+
+  expect(result.current.sensitivity).toBe(0.03);
+  expect(localStorage.getItem('poopsmoothie-mic-sensitivity')).toBe('0.03');
+  // the server fixes the floor when the session is created, so a live change
+  // only takes effect if mic-on is re-sent
+  expect(mockEmitAck).toHaveBeenCalledWith('mic-on', { minEnergy: 0.03 });
+});
+
+test('changing sensitivity while the mic is off does not start a session', () => {
+  const { result } = renderHook(() => useOpenMic());
+  mockEmitAck.mockClear();
+
+  act(() => {
+    result.current.setSensitivity(0.04);
+  });
+
+  expect(result.current.sensitivity).toBe(0.04);
+  expect(mockEmitAck).not.toHaveBeenCalled();
 });
 
 test('a rejected mic permission surfaces an error and never reports "on"', async () => {

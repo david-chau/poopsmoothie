@@ -73,6 +73,20 @@ export function GameProvider({ children }: { children: ReactNode }) {
         return { ...prev, round: { ...prev.round, chat: next } };
       });
     }
+    function onChatMessageUpdated(msg: ChatMessage) {
+      setState((prev) => {
+        if (!prev) return prev;
+        const next = prev.round.chat.map((m) => (m.id === msg.id ? msg : m));
+        return { ...prev, round: { ...prev.round, chat: next } };
+      });
+    }
+    function onChatMessageDeleted({ id }: { id: string }) {
+      setState((prev) => {
+        if (!prev) return prev;
+        const next = prev.round.chat.filter((m) => m.id !== id);
+        return { ...prev, round: { ...prev.round, chat: next } };
+      });
+    }
     function onRejoinFailed() {
       identityRef.current = null;
       setIdentity(null);
@@ -92,6 +106,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
     socket.on('state', onState);
     socket.on('slip-revealed', onSlipRevealed);
     socket.on('chat-message', onChatMessage);
+    socket.on('chat-message-updated', onChatMessageUpdated);
+    socket.on('chat-message-deleted', onChatMessageDeleted);
     socket.on('room-closed', onRoomClosed);
     wireAutoRejoin(onRejoinFailed);
 
@@ -99,6 +115,8 @@ export function GameProvider({ children }: { children: ReactNode }) {
       socket.off('state', onState);
       socket.off('slip-revealed', onSlipRevealed);
       socket.off('chat-message', onChatMessage);
+      socket.off('chat-message-updated', onChatMessageUpdated);
+      socket.off('chat-message-deleted', onChatMessageDeleted);
       socket.off('room-closed', onRoomClosed);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

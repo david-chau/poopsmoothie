@@ -3,6 +3,31 @@ import path from 'node:path';
 
 export const SAMPLE_RATE = 16000;
 
+function floatEnv(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/** How much trailing silence ends an utterance. Straight latency: nothing is
+ *  decoded until the VAD has heard this much quiet, so it's paid on every
+ *  single line. 0.3s rather than the silero default 0.5s — but kept tunable,
+ *  because this is the one knob here with a real tradeoff in both directions:
+ *  too low and a mid-sentence breath splits one thought into two chat lines. */
+const VAD_MIN_SILENCE = floatEnv('PS_VAD_MIN_SILENCE', 0.3);
+
+/** Segments quieter than this never reach the decoder. The VAD only decides
+ *  "is this speech", not "is this speech we have any hope of transcribing" —
+ *  a phone across the room clears that bar and then produces confident
+ *  nonsense ("When an alcoholism"). Gating on energy is what actually
+ *  separates the two, and it's per-device because being far away is a
+ *  property of the device, not the room (clients send their own via mic-on).
+ *  0 disables the gate entirely, which is the pre-existing behaviour. */
+export const DEFAULT_MIN_ENERGY = 0.012;
+
+/** Below this, a "segment" is a cough, a chair, or a clipped "Uh" — never a
+ *  sentence worth an audit-trail line, and never worth a decode. */
+const MIN_SEGMENT_SEC = 0.35;
+
 // One language, one recognizer, never mixed — a single bilingual model was
 // tried first and dropped: trained on Mandarin/English code-switching speech,
 // it's biased toward hearing Chinese even from a pure-English speaker (tested
@@ -101,7 +126,7 @@ export async function loadModels(modelDir, { numThreads = 1 } = {}) {
     sileroVad: {
       model: path.join(modelDir, 'silero_vad.onnx'),
       threshold: 0.5,
-      minSilenceDuration: 0.5,
+      minSilenceDuration: VAD_MIN_SILENCE,
       minSpeechDuration: 0.25,
       maxSpeechDuration: 15,
       windowSize: 512,
@@ -127,6 +152,49 @@ export async function loadModels(modelDir, { numThreads = 1 } = {}) {
     provider: 'cpu',
   });
   return { sherpa, recognizers, vadConfig, embeddingExtractor };
+}
+
+/** Which languages this model dir can actually offer. A directory check only
+ *  — cheap enough to call from the main thread without loading anything. */
+export function availableLanguages(modelDir) {
+  return LANGUAGES.filter((lang) => fs.existsSync(path.join(modelDir, lang)));
+}
+
+/**
+ * The VAD half of `loadModels`, and nothing else. When decoding runs in
+ * worker threads (the default — see createWorkerPool) the main thread never
+ * touches a recognizer, so loading 631MB of ASR weights here would be pure
+ * waste: silero is 632KB and is all the segmenter needs. The recognizers and
+ * the embedding extractor live in the workers instead.
+ *
+ * Throws for the same reason loadModels does — no language directories at all
+ * means no voice chat — so the caller's existing "optional, never fatal"
+ * try/catch keeps working unchanged.
+ */
+export async function loadVadOnly(modelDir, { numThreads = 1 } = {}) {
+  const languages = availableLanguages(modelDir);
+  if (languages.length === 0) {
+    throw new Error(`no ASR model directories found under ${modelDir} (expected one of: ${LANGUAGES.join(', ')})`);
+  }
+  const sherpa = (await import('sherpa-onnx-node')).default; // see loadModels for why `.default`
+  const vadModel = path.join(modelDir, 'silero_vad.onnx');
+  if (!fs.existsSync(vadModel)) throw new Error(`missing ${vadModel}`);
+  return {
+    sherpa,
+    languages,
+    vadConfig: {
+      sileroVad: {
+        model: vadModel,
+        threshold: 0.5,
+        minSilenceDuration: VAD_MIN_SILENCE,
+        minSpeechDuration: 0.25,
+        maxSpeechDuration: 15,
+        windowSize: 512,
+      },
+      sampleRate: SAMPLE_RATE,
+      numThreads,
+    },
+  };
 }
 
 function int16ToFloat32(int16) {
@@ -332,8 +400,21 @@ function rms(float32Samples) {
  *  here rather than becoming blank chat lines. `queue`'s decodeFn is expected
  *  to resolve `{text, embedding}` (see createEngine) — embedding may be null
  *  if the model doesn't support it. None of this metadata reaches a client;
- *  it's for server/arbiter.js's cross-device dedup and speaker matching. */
-export function createMicSession({ models, queue, language = LANGUAGES[0], onFinal, onWarn }) {
+ *  it's for server/arbiter.js's cross-device dedup and speaker matching.
+ *
+ *  `minEnergy` and `wantEmbedding` are both decided per session by the caller
+ *  (events.js): the first from the device's own sensitivity setting, the
+ *  second from whether anyone in the room actually enrolled a voiceprint. */
+export function createMicSession({
+  models,
+  queue,
+  language = LANGUAGES[0],
+  minEnergy = DEFAULT_MIN_ENERGY,
+  minSegmentSec = MIN_SEGMENT_SEC,
+  wantEmbedding = true,
+  onFinal,
+  onWarn,
+}) {
   const segmenter = createSegmenter(models);
   return {
     pushFrame(int16Samples) {
@@ -351,9 +432,16 @@ export function createMicSession({ models, queue, language = LANGUAGES[0], onFin
         const t1 = Date.now();
         const t0 = t1 - (samples.length / SAMPLE_RATE) * 1000;
         const energy = rms(samples);
+        // Dropped *before* the queue, not after decoding: a segment we already
+        // know we won't trust shouldn't spend a decode slot proving it. That
+        // makes this a latency win for everyone else on the box, not just a
+        // quality one for whoever's phone is across the room.
+        if (energy < minEnergy) continue;
+        if (samples.length / SAMPLE_RATE < minSegmentSec) continue;
         queue.enqueue({
           samples,
           language, // fixed for this session's lifetime — see createSession's caller in events.js
+          wantEmbedding,
           resolve: (result) => {
             const text = typeof result === 'string' ? result : result?.text;
             const clean = typeof text === 'string' ? text.trim() : '';
@@ -373,10 +461,17 @@ export function createMicSession({ models, queue, language = LANGUAGES[0], onFin
  *  models with the shared concurrency-capped queue so every socket's session
  *  draws from one NAS-wide budget instead of one each. Embedding computation
  *  rides in the same queued job as ASR decode (same concurrency cap covers
- *  both) rather than as a second, separately-capped pipeline. */
+ *  both) rather than as a second, separately-capped pipeline.
+ *
+ *  In-process (blocking) decode. This is the fallback path and what the tests
+ *  and scripts/stt-bench.mjs use; the server normally runs `startEngine`,
+ *  which puts decode in worker threads instead. */
 export function createEngine(models, { maxConcurrent = 4, maxQueued = 8 } = {}) {
   const queue = new TranscriptionQueue(
-    (samples, job) => ({ text: decodeSegment(models, samples, job.language), embedding: computeEmbedding(models, samples) }),
+    (samples, job) => ({
+      text: decodeSegment(models, samples, job.language),
+      embedding: job.wantEmbedding === false ? null : computeEmbedding(models, samples),
+    }),
     {
       maxConcurrent,
       maxQueued,
@@ -391,5 +486,132 @@ export function createEngine(models, { maxConcurrent = 4, maxQueued = 8 } = {}) 
     // enrollment is a rare, one-shot user action (not a continuous stream),
     // so it runs directly rather than through the shared queue
     computeEnrollment: (int16Samples) => computeEmbeddingFromInt16(models, int16Samples),
+    close() {},
+  };
+}
+
+/**
+ * A pool of stt-worker.js threads. Each worker loads its own copy of the
+ * models (~700MB), which is exactly why the default size is 1 rather than the
+ * old maxConcurrent default of 4: one worker already frees the event loop
+ * completely, and every extra one buys parallelism at ~700MB a head.
+ *
+ * Resolves only once every worker reports `ready`, so the engine never hands
+ * out a decode slot backed by a thread that's still loading (or has already
+ * failed) — a failure during startup rejects, and the caller falls back to
+ * in-process decoding.
+ */
+export async function createWorkerPool(modelDir, { size = 1, numThreads = 1 } = {}) {
+  const { Worker } = await import('node:worker_threads');
+  const workerUrl = new URL('./stt-worker.js', import.meta.url);
+  const workers = [];
+
+  const spawn = () =>
+    new Promise((resolve, reject) => {
+      const worker = new Worker(workerUrl, {
+        workerData: { modelDir, numThreads },
+        // Workers inherit the parent's execArgv by default, and Worker only
+        // accepts a narrow allowlist of flags — so anything the parent happens
+        // to be running with can make every worker fail to start, silently
+        // dropping the whole pool back to in-process decoding. `node --test`
+        // and `node --input-type=module -e` both do exactly that. This worker
+        // needs no inherited flags: give it none rather than gambling on
+        // whichever ones the parent came up with.
+        execArgv: [],
+      });
+      const entry = { worker, inFlight: new Map(), busy: 0 };
+      const onInit = (msg) => {
+        if (msg.type === 'ready') {
+          worker.off('message', onInit);
+          worker.on('message', (m) => {
+            const job = entry.inFlight.get(m.id);
+            if (!job) return;
+            entry.inFlight.delete(m.id);
+            entry.busy--;
+            if (m.ok) job.resolve({ text: m.text, embedding: m.embedding ?? null });
+            else job.reject(new Error(m.error));
+          });
+          resolve(entry);
+        } else if (msg.type === 'init-error') {
+          reject(new Error(msg.error));
+        }
+      };
+      worker.on('message', onInit);
+      worker.on('error', reject);
+      // A worker that dies mid-flight must not leave its callers hanging
+      // forever — fail them explicitly, same reasoning as rejecting on error.
+      worker.on('exit', (code) => {
+        for (const job of entry.inFlight.values()) job.reject(new Error(`stt worker exited (${code})`));
+        entry.inFlight.clear();
+        entry.busy = 0;
+        // `terminate()` itself exits with code 1, so only complain about an
+        // exit we didn't ask for — otherwise every clean shutdown logs a
+        // scary-looking warning that means nothing.
+        if (code !== 0 && !entry.terminating) console.warn(`voice: stt worker exited with code ${code}`);
+      });
+    });
+
+  for (let i = 0; i < size; i++) workers.push(await spawn());
+
+  let nextId = 1;
+  function send(payload) {
+    // least-busy rather than round-robin: the queue caps in-flight work at the
+    // pool size, so this reliably finds an idle worker instead of stacking two
+    // jobs on one while another sits doing nothing
+    const entry = workers.reduce((a, b) => (b.busy < a.busy ? b : a));
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+      entry.inFlight.set(id, { resolve, reject });
+      entry.busy++;
+      // the samples buffer is never read again on this side, so hand over
+      // ownership rather than copying it across the thread boundary
+      entry.worker.postMessage({ id, ...payload }, [payload.samples.buffer]);
+    });
+  }
+
+  return {
+    size: workers.length,
+    decode: (samples, job) =>
+      send({ type: 'decode', samples, language: job.language, wantEmbedding: job.wantEmbedding !== false }),
+    computeEnrollment: (samples) => send({ type: 'enroll', samples }).then((r) => r.embedding),
+    close: () =>
+      Promise.all(
+        workers.map((w) => {
+          w.terminating = true;
+          return w.worker.terminate();
+        }),
+      ),
+  };
+}
+
+/**
+ * What index.js actually calls: VAD on this thread, decode in workers, with a
+ * transparent fallback to fully in-process decoding if the workers can't
+ * start. Voice chat staying up (slower) beats voice chat vanishing, which is
+ * the same "optional, never fatal" contract as a missing TLS cert.
+ */
+export async function startEngine(modelDir, { numThreads = 1, maxConcurrent = 1, maxQueued = 8 } = {}) {
+  const vad = await loadVadOnly(modelDir, { numThreads });
+  let pool;
+  try {
+    pool = await createWorkerPool(modelDir, { size: maxConcurrent, numThreads });
+  } catch (err) {
+    console.warn(`voice: worker threads unavailable, decoding in-process (${err.message})`);
+    const models = await loadModels(modelDir, { numThreads });
+    return createEngine(models, { maxConcurrent, maxQueued });
+  }
+
+  const queue = new TranscriptionQueue(pool.decode, {
+    maxConcurrent,
+    maxQueued,
+    onShed: () => console.warn('voice: dropped a queued segment under load'),
+  });
+  return {
+    models: vad,
+    languages: vad.languages,
+    workers: pool.size,
+    createSession: (opts) => createMicSession({ models: vad, queue, ...opts }),
+    computeEnrollment: (int16Samples) => pool.computeEnrollment(int16Samples),
+    close: () => pool.close(),
   };
 }

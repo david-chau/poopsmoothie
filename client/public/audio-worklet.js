@@ -5,14 +5,17 @@
 //
 // Downsamples the mic's native sample rate (whatever the device gives us,
 // commonly 48000Hz) to the 16kHz mono Int16 PCM the server's VAD/ASR models
-// expect, buffers ~250ms, and posts each buffer back to the main thread.
+// expect, buffers ~120ms, and posts each buffer back to the main thread.
 // Shorter than it sounds like it needs to be on purpose: whatever's left in
 // this buffer when someone stops talking has to wait for the *next* full
 // frame before the server's VAD even sees the silence that ends the segment
 // — that tail wait is pure added latency, and it was the visible majority of
-// the "why does this take so long to show up" delay at 500ms.
+// the "why does this take so long to show up" delay at 500ms. Kept in step
+// with AUDIO_FRAME_BURST in server/events.js: halving this doubles the frame
+// rate, and the server's rate limiter has to be raised to match or normal
+// speech gets throttled mid-sentence.
 const TARGET_RATE = 16000;
-const FRAME_MS = 250;
+const FRAME_MS = 120;
 
 class MicCaptureProcessor extends AudioWorkletProcessor {
   constructor() {

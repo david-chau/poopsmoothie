@@ -27,7 +27,31 @@ test('dialog layout is scoped to [open] so closing actually hides it', () => {
 test('the dice button outranks the generic .btn width', () => {
   expect(css).toMatch(/\.word-row\s*>\s*\.dice-btn\s*\{/);
   expect(css.indexOf('.word-row > .dice-btn')).toBeGreaterThan(-1);
-  expect(block('.word-row > .dice-btn')).toMatch(/width:\s*auto/);
+  const rule = block('.word-row > .dice-btn');
+  // what actually matters is that it overrides the 100%, not the specific
+  // value it overrides it *with* — it's a fixed column now, because the
+  // folding animation reserves and offsets by exactly this width
+  expect(rule).toMatch(/width:\s*(auto|var\(--dice-col\)|[\d.]+(rem|px))/);
+  expect(rule).not.toMatch(/width:\s*100%/);
+});
+
+// Regression: the dice buttons used to be unmounted while the slips folded
+// into the box, which freed their column and made every slip jump sideways
+// and widen at the exact moment the fold began. They now stay in the layout,
+// so the box has to offset by that same column or it no longer lines up with
+// the paper falling into it.
+test('the folding box offsets by the dice column it now has to share the row with', () => {
+  expect(block('.word-row > .dice-btn-placeholder')).toMatch(/visibility:\s*hidden/);
+  expect(block('.foldaway-box')).toMatch(/margin-right:/);
+});
+
+// Regression: the folded slip replaces the input *in place*, so any metric
+// that differs between the two reads as the paper resizing mid-animation.
+test('the folding slip keeps the written slip\'s ink metrics', () => {
+  const input = block('.write-slip-input');
+  const folded = block('.foldaway-text');
+  const fontOf = (rule: string) => rule.match(/font-size:\s*([^;]+)/)?.[1]?.trim();
+  expect(fontOf(folded)).toBe(fontOf(input));
 });
 
 // Regression: .paper-surface carried `position:absolute; inset:0` from the rule

@@ -35,6 +35,9 @@ export interface ChatMessage {
   via: 'text' | 'voice';
   text: string;
   at: number;
+  /** set once the author corrects it (see chat-edit) — shown, not hidden, so
+   *  the transcript stays honest about what was actually said in the moment. */
+  edited?: boolean;
 }
 
 export interface RoundPublic {

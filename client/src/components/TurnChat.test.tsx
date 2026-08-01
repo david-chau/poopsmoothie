@@ -1,10 +1,10 @@
 import { test, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { makeState } from '../test-fixtures';
 import type { ChatMessage } from '../types';
 
-const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoiceHttpsUrl, mockUseVoiceEnroll, mockEnrollRecord } =
+const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoiceHttpsUrl, mockUseVoiceEnroll, mockEnrollRecord, MIC_EXTRA } =
   vi.hoisted(() => ({
     mockUseGame: vi.fn(),
     mockEmitAck: vi.fn(),
@@ -15,7 +15,18 @@ const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoic
       fn(false);
       return () => {};
     }),
-    mockUseOpenMic: vi.fn(() => ({ on: false, level: 0, error: null, start: vi.fn(), stop: vi.fn() })),
+    // the sensitivity pair the live meter reads; spread into every stubbed
+    // useOpenMic return so a test only has to state what it actually cares about
+    MIC_EXTRA: { sensitivity: 0.012, setSensitivity: vi.fn() },
+    mockUseOpenMic: vi.fn(() => ({
+      on: false,
+      level: 0,
+      error: null,
+      start: vi.fn(),
+      stop: vi.fn(),
+      sensitivity: 0.012,
+      setSensitivity: vi.fn(),
+    })),
     // default: nothing to suggest (already secure, or no https listener)
     mockVoiceHttpsUrl: vi.fn(() => null),
     mockEnrollRecord: vi.fn(),
@@ -27,7 +38,10 @@ vi.mock('../socket', () => ({
   onVoiceAvailable: mockOnVoiceAvailable,
   voiceHttpsUrl: mockVoiceHttpsUrl,
 }));
-vi.mock('../useOpenMic', () => ({ useOpenMic: mockUseOpenMic }));
+vi.mock('../useOpenMic', () => ({
+  useOpenMic: mockUseOpenMic,
+  MIN_ENERGY_RANGE: { min: 0, max: 0.06, default: 0.012 },
+}));
 vi.mock('../useVoiceEnroll', () => ({ useVoiceEnroll: mockUseVoiceEnroll, DEFAULT_RECORD_SECONDS: 5 }));
 
 import TurnChat from './TurnChat';
@@ -215,7 +229,7 @@ test('already enrolled: clicking the mic toggle starts capture directly, without
     fn(true);
     return () => {};
   });
-  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn(), ...MIC_EXTRA });
   mockUseGame.mockReturnValue({
     state: makeState({
       phase: 'ROUND1',
@@ -240,7 +254,7 @@ test('not yet enrolled: clicking the mic toggle records a sample first, then sta
     fn(true);
     return () => {};
   });
-  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn(), ...MIC_EXTRA });
   setup([]); // p1 has no voiceEnrolled flag -> not enrolled
 
   render(<TurnChat />);
@@ -259,7 +273,7 @@ test('a failed enrollment recording does not start the mic', async () => {
     fn(true);
     return () => {};
   });
-  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn(), ...MIC_EXTRA });
   setup([]);
 
   render(<TurnChat />);
@@ -276,7 +290,7 @@ test('a listening mic renders as on and can be stopped from the same toggle', as
     fn(true);
     return () => {};
   });
-  mockUseOpenMic.mockReturnValue({ on: true, level: 0.5, error: null, start: vi.fn(), stop });
+  mockUseOpenMic.mockReturnValue({ on: true, level: 0.5, error: null, start: vi.fn(), stop, ...MIC_EXTRA });
   setup([]);
   render(<TurnChat />);
 
@@ -291,7 +305,7 @@ test('a mic error is surfaced distinctly from a chat-send error', () => {
     fn(true);
     return () => {};
   });
-  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: 'could not access the microphone', start: vi.fn(), stop: vi.fn() });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: 'could not access the microphone', start: vi.fn(), stop: vi.fn(), ...MIC_EXTRA });
   setup([]);
   render(<TurnChat />);
   expect(screen.getByText('Mic: could not access the microphone')).toBeInTheDocument();
@@ -338,4 +352,129 @@ test('no https nag when the server has no voice at all — https would not help'
   setup([]);
   render(<TurnChat />);
   expect(screen.queryByText(/needs a secure connection/i)).not.toBeInTheDocument();
+});
+
+// --- the live meter: the point is seeing whether your voice clears the line -
+
+const micOn = (over: Record<string, unknown> = {}) => {
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(true);
+    return () => {};
+  });
+  mockUseOpenMic.mockReturnValue({
+    on: true,
+    level: 0,
+    error: null,
+    start: vi.fn(),
+    stop: vi.fn(),
+    sensitivity: 0.012,
+    setSensitivity: vi.fn(),
+    ...over,
+  });
+};
+
+test('the meter only appears while the mic is actually listening', () => {
+  micOn({ on: false });
+  setup([]);
+  render(<TurnChat />);
+  expect(screen.queryByLabelText('Mic sensitivity')).not.toBeInTheDocument();
+});
+
+test('a level above the threshold reads as passing, below as not', () => {
+  micOn({ level: 0.05, sensitivity: 0.012 });
+  setup([]);
+  const { container, unmount } = render(<TurnChat />);
+  expect(container.querySelector('.mic-meter-fill-passing')).toBeTruthy();
+  unmount();
+
+  micOn({ level: 0.002, sensitivity: 0.012 });
+  setup([]);
+  const { container: quiet } = render(<TurnChat />);
+  expect(quiet.querySelector('.mic-meter-fill-passing')).toBeNull();
+});
+
+test('dragging the slider reports the new floor', () => {
+  const setSensitivity = vi.fn();
+  micOn({ setSensitivity });
+  setup([]);
+  render(<TurnChat />);
+
+  // fireEvent rather than userEvent: a range input is dragged, not typed into,
+  // and userEvent has no drag-to-value gesture for it
+  fireEvent.change(screen.getByLabelText('Mic sensitivity'), { target: { value: '0.03' } });
+  expect(setSensitivity).toHaveBeenCalledWith(0.03);
+});
+
+test('the meter never overflows its bar, however loud the input', () => {
+  micOn({ level: 5 }); // far past full scale
+  setup([]);
+  const { container } = render(<TurnChat />);
+  const fill = container.querySelector('.mic-meter-fill') as HTMLElement;
+  expect(fill.style.width).toBe('100%');
+});
+
+// --- editing/deleting your own line (mainly: fixing a voice mishear) -------
+
+test('only your own messages offer edit and delete', () => {
+  setup([msg({ id: 'mine', playerId: 'p1', text: 'mine' }), msg({ id: 'theirs', playerId: 'p2', text: 'theirs' })], 'p1');
+  render(<TurnChat />);
+
+  expect(screen.getAllByLabelText('Edit your message')).toHaveLength(1);
+  expect(screen.getAllByLabelText('Delete your message')).toHaveLength(1);
+  // and it's attached to the row that is actually mine
+  expect(screen.getByText('mine').closest('li')).toContainElement(screen.getByLabelText('Edit your message'));
+});
+
+test('editing sends the correction and leaves edit mode', async () => {
+  const user = userEvent.setup();
+  setup([msg({ id: 'm', playerId: 'p1', via: 'voice', text: 'True.' })], 'p1');
+  render(<TurnChat />);
+
+  await user.click(screen.getByLabelText('Edit your message'));
+  const input = screen.getByDisplayValue('True.');
+  await user.clear(input);
+  await user.type(input, 'Too');
+  await user.click(screen.getByLabelText('Save correction'));
+
+  expect(mockEmitAck).toHaveBeenCalledWith('chat-edit', { id: 'm', text: 'Too' });
+});
+
+test('cancelling an edit sends nothing and restores the row', async () => {
+  const user = userEvent.setup();
+  setup([msg({ id: 'm', playerId: 'p1', text: 'original' })], 'p1');
+  render(<TurnChat />);
+
+  await user.click(screen.getByLabelText('Edit your message'));
+  await user.click(screen.getByLabelText('Cancel edit'));
+
+  expect(mockEmitAck).not.toHaveBeenCalledWith('chat-edit', expect.anything());
+  expect(screen.getByText('original')).toBeInTheDocument();
+});
+
+test('an empty correction is refused locally rather than sent', async () => {
+  const user = userEvent.setup();
+  setup([msg({ id: 'm', playerId: 'p1', text: 'original' })], 'p1');
+  render(<TurnChat />);
+
+  await user.click(screen.getByLabelText('Edit your message'));
+  await user.clear(screen.getByDisplayValue('original'));
+  await user.click(screen.getByLabelText('Save correction'));
+
+  expect(mockEmitAck).not.toHaveBeenCalledWith('chat-edit', expect.anything());
+  expect(screen.getByText(/can't be empty/i)).toBeInTheDocument();
+});
+
+test('deleting hits chat-delete for that message', async () => {
+  const user = userEvent.setup();
+  setup([msg({ id: 'gone', playerId: 'p1', text: 'oops' })], 'p1');
+  render(<TurnChat />);
+
+  await user.click(screen.getByLabelText('Delete your message'));
+  expect(mockEmitAck).toHaveBeenCalledWith('chat-delete', { id: 'gone' });
+});
+
+test('an edited message says so — a correction must not read as what was said live', () => {
+  setup([msg({ id: 'm', playerId: 'p2', text: 'Too', edited: true })], 'p1');
+  render(<TurnChat />);
+  expect(screen.getByText('(edited)')).toBeInTheDocument();
 });

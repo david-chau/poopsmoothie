@@ -279,3 +279,77 @@ test('bots write real phrases from the suggestion bank, not filler', async () =>
 
   await ack(host, 'remove-bots');
 });
+
+test('bots submit again after "Play again" — the rematch must not inherit the last game\'s state', async () => {
+  const host = await connect();
+  let state = null;
+  host.on('state', (s) => (state = s));
+  // slip text only ever reaches the drawer's own socket, never the public
+  // state — so this is the only way for the host to know what it's holding
+  let mySlip = null;
+  host.on('slip-revealed', (payload) => (mySlip = payload));
+  const create = await ack(host, 'create-room', { name: 'Host' });
+
+  const bots = [1, 2, 3].map((i) =>
+    createBot({ url, roomCode: create.roomCode, name: `RBot${i}`, startDelayMs: 0, guessDelayMs: 0, correctProbability: 1 }),
+  );
+  bots.forEach((b) => cleanup.push(() => b.socket.disconnect()));
+
+  await until(
+    () => state,
+    (s) => s.players.length === 4,
+  );
+  await ack(host, 'set-config', { wordsPerPlayer: 1 });
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['first-game'] });
+  await until(
+    () => state,
+    (s) => s.phase === 'ROUND1',
+    4000,
+  );
+
+  // play-again is SCORES-only, so the first game has to actually finish.
+  // One generic drive loop rather than nested waits: whenever the host is the
+  // drawer, clear a slip; whenever a bot is, it plays itself and this just
+  // keeps polling. Everything is bounded by one deadline so a stall fails
+  // here rather than hanging the suite.
+  const deadline = Date.now() + 25_000;
+  while (state.phase !== 'SCORES' && Date.now() < deadline) {
+    if (state.round?.awaitingReady) {
+      await ack(host, 'start-round-now');
+    } else if (state.round?.drawerId === create.playerId) {
+      if (!state.round.turnEndsAt) {
+        mySlip = null;
+        await ack(host, 'start-turn');
+      } else if (mySlip) {
+        const { slip, turnId } = mySlip;
+        mySlip = null;
+        await ack(host, 'correct-guess', { slipId: slip.id, turnId });
+      }
+    }
+    await new Promise((r) => setTimeout(r, 60));
+  }
+  if (state.phase !== 'SCORES') {
+    console.log('DEBUG stuck:', JSON.stringify({ phase: state.phase, round: state.round?.number, drawer: state.round?.drawerId, me: create.playerId, remaining: state.round?.remainingCount, awaiting: state.round?.awaitingReady, turnEndsAt: state.round?.turnEndsAt, slip: state.round?.currentSlipId }));
+  }
+  assert.equal(state.phase, 'SCORES', 'first game reached the scores screen');
+
+  await ack(host, 'play-again');
+  await until(
+    () => state,
+    (s) => s.phase === 'LOBBY',
+    4000,
+  );
+
+  await ack(host, 'start-game');
+  await ack(host, 'submit-words', { words: ['second-game'] });
+
+  // the regression: a bot whose `submitted` latch survived the first game
+  // never writes words again, and the table sits in WRITING forever
+  await until(
+    () => state,
+    (s) => s.phase === 'ROUND1',
+    5000,
+  );
+  assert.equal(state.phase, 'ROUND1', 'bots re-submitted, so the rematch actually started');
+});

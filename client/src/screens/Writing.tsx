@@ -158,18 +158,20 @@ export default function Writing() {
               />
             </div>
           )}
-          {/* gone once folding starts: there is nothing left to re-roll, and
-              leaving it there pushed the slips off-centre from the box */}
-          {!folding && (
-            <button
-              className="btn dice-btn"
-              onClick={() => suggestOne(i)}
-              aria-label={`Suggest a word or phrase for slot ${i + 1}`}
-              title="Suggest one for me"
-            >
-              🎲
-            </button>
-          )}
+          {/* Hidden rather than unmounted once folding starts: there is
+              nothing left to re-roll, but removing it freed its column and
+              every slip jumped sideways and widened at the exact moment the
+              fold began. It keeps its space; .foldaway-box offsets to match. */}
+          <button
+            className={`btn dice-btn${folding ? ' dice-btn-placeholder' : ''}`}
+            onClick={() => suggestOne(i)}
+            aria-label={`Suggest a word or phrase for slot ${i + 1}`}
+            title="Suggest one for me"
+            disabled={!!folding}
+            aria-hidden={folding ? true : undefined}
+          >
+            🎲
+          </button>
         </div>
       ))}
       {folding ? (

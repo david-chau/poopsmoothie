@@ -70,6 +70,16 @@ export function createBot({
     lastState = state;
     if (!me) return;
 
+    // "Play again" reopens the lobby around the same people on the same
+    // socket, so every per-game latch below has to clear or the bot carries
+    // the finished game's state into the new one — a still-true `submitted`
+    // meant it silently never wrote words for the rematch, and the table sat
+    // in WRITING forever waiting on a bot that thought it was already done.
+    if (state.phase === 'LOBBY') {
+      submitted = false;
+      turnStartAttempted = null;
+    }
+
     if (state.phase === 'WRITING' && !submitted && !state.submittedPlayerIds.includes(me)) {
       submitted = true;
       const words = await botWords(ack, socket, state.config.wordsPerPlayer);

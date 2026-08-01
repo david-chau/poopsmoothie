@@ -112,13 +112,24 @@ and only appears once the server actually has the speech models loaded.
 voice is on) picks which one — one at a time, never both, since mixing them
 made transcription noticeably worse. If several phones catch the same thing
 said out loud, only one line shows up, attributed to whoever said it — not
-whichever phone happened to catch it loudest. **Voice ID** (next to the mic
-toggle) lets you record a short sample once so you're still credited
-correctly even on someone else's phone; skipping it is fine, chat still
-works, it's just occasionally attributed to whoever's phone caught it. Only
-text is ever stored — raw audio is discarded the instant it's
-transcribed/matched. Pipeline internals (VAD, ASR, dedup, speaker
-embeddings): [Architecture](ARCHITECTURE.md#voice-chat-pipeline).
+whichever phone happened to catch it loudest. **Voice ID** — the mic toggle
+itself, the first time you tap it — records a short sample so you're still
+credited correctly even on someone else's phone; the two are one control
+because the sample has to exist before there's anything to match against.
+Once recorded, **Re-record** replaces it. Only text is ever stored — raw
+audio is discarded the instant it's transcribed/matched.
+
+**Mic sensitivity** (the slider under the mic, per device) is the fix for a
+phone sitting across the table: it hears enough to trigger, not enough to
+transcribe, and posts confident nonsense. The bar above it is your live input
+level with the cutoff drawn on it — talk normally, and if the bar doesn't
+pass the line, the server is discarding you. Drag right to ignore more
+distant/quiet sound. It's per device on purpose: being far away is a property
+of your phone, not of the room, so one room-wide value could never be right
+for everyone at the table. The setting is remembered on that device.
+
+Pipeline internals (VAD, the far-mic gate, ASR in worker threads, dedup,
+speaker embeddings): [Architecture](ARCHITECTURE.md#voice-chat-pipeline).
 
 ## Sound
 

@@ -217,9 +217,14 @@ input:focus,
 /* row spacing comes from .screen's gap now that each input sits in a
    .word-row alongside its dice button */
 .word-row {
+  /* a known width rather than "whatever the glyph needs": the folding
+     animation has to reserve exactly this much space, and the box has to
+     offset by exactly this much, so it can't be padding-derived */
+  --dice-col: 3rem;
+  --dice-gap: 0.5rem;
   display: flex;
   align-items: stretch;
-  gap: 0.5rem;
+  gap: var(--dice-gap);
 }
 
 .word-row > .word-input {
@@ -231,10 +236,20 @@ input:focus,
    than a bare `.dice-btn` so it outranks `.btn { width: 100% }` below, which
    would otherwise win on source order and let the button eat the whole row. */
 .word-row > .dice-btn {
-  width: auto;
-  flex: 0 0 auto;
-  padding: 0 0.9rem;
+  width: var(--dice-col);
+  flex: 0 0 var(--dice-col);
+  padding: 0;
   font-size: 1.1rem;
+}
+
+/* Kept in the layout, just not drawn, once folding starts. Unmounting it
+   instead let every slip widen into the freed column at the exact moment the
+   fold began — the slips visibly jumped sideways and changed size before any
+   paper had moved. There is nothing left to re-roll at that point, so it only
+   has to hold its space. */
+.word-row > .dice-btn-placeholder {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .room-code-input {
@@ -1680,11 +1695,62 @@ input:focus,
   color: var(--accent-text);
 }
 
-.turn-chat-mic-level {
-  width: 0.45rem;
-  height: 0.45rem;
-  border-radius: 50%;
-  background: currentColor;
+/* Live input level + the cutoff it has to clear, sharing one bar so the
+   comparison is the thing you see (see MicMeter in TurnChat.tsx). */
+/* inline in the chat header, beside the toggle it belongs to: as its own
+   boxed row with a caption it ate more height than the log underneath it */
+.mic-meter {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  flex: 1 1 7rem;
+  min-width: 4.5rem;
+}
+
+.mic-meter-bar {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 2.5rem;
+  height: 0.4rem;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+/* deliberately short — it's a nudge-to-taste control, not a precise one, and
+   the bar beside it is what actually tells you whether it's set right */
+.mic-meter-slider {
+  flex: 0 0 4rem;
+  width: 4rem;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.mic-meter-fill {
+  height: 100%;
+  background: var(--text-dim);
+  /* only a short smoothing pass — the meter has to feel live, and anything
+     slower reads as lag rather than as your own voice */
+  transition: width 60ms linear;
+}
+
+.mic-meter-fill-passing {
+  background: var(--accent);
+}
+
+.mic-meter-threshold {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mic-meter-fill {
+    transition: none;
+  }
 }
 
 .turn-chat-filters {
@@ -1770,6 +1836,62 @@ input:focus,
 
 .turn-chat-text {
   word-break: break-word;
+}
+
+.turn-chat-edited {
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--text-dim);
+}
+
+/* hidden until the row is hovered/focused, except on touch (no hover) where
+   they're small enough to sit quietly next to your own lines permanently */
+.turn-chat-row-actions {
+  display: inline-flex;
+  gap: 0.15rem;
+  opacity: 0;
+}
+
+.turn-chat-row:hover .turn-chat-row-actions,
+.turn-chat-row:focus-within .turn-chat-row-actions {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .turn-chat-row-actions {
+    opacity: 1;
+  }
+}
+
+.turn-chat-row-action {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0 0.15rem;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+
+.turn-chat-row-action:hover {
+  color: var(--text);
+}
+
+.turn-chat-row-editing {
+  flex-wrap: nowrap;
+}
+
+.turn-chat-edit-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 0.15rem 0.4rem;
+}
+
+.turn-chat-row-error {
+  flex-basis: 100%;
+  font-size: 0.7rem;
 }
 
 .turn-chat-compose {
@@ -1916,13 +2038,17 @@ input:focus,
   max-width: none;
 }
 
+/* matches .write-slip-input's horizontal padding: this face replaces that
+   input in place, so any difference reads as the paper resizing at the
+   moment of the swap rather than as one continuous object */
 .slip-compact .slip-face {
-  padding: 0 0.6rem;
+  padding: 0 1.1rem;
 }
 
 .foldaway-text {
   color: #2c2213;
-  font-size: 0.9rem;
+  /* same ink metrics as .write-slip-input, for the same reason */
+  font-size: 1.05rem;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -1930,12 +2056,16 @@ input:focus,
   max-width: 100%;
 }
 
-/* the dice buttons are unmounted while folding, so the rows span the full
-   column and plain centring lines the box up with them */
+/* The dice column is still there while folding (hidden, holding its space),
+   so the slips do NOT span the full width — plain centring would line the box
+   up with the row rather than with the paper. A right margin of exactly the
+   dice column shifts the centre left by half of it, which is the difference
+   between the two. */
 .foldaway-box {
   position: relative;
   align-self: center;
   width: min(260px, 70%);
+  margin-right: calc(3rem + 0.5rem);
   margin-top: 1rem;
   height: 74px;
   border-radius: 6px 6px 10px 10px;

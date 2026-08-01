@@ -79,13 +79,18 @@ server/
   bot.js         bot factory — a socket.io client that plays itself
   bots.js        host-spawned bot lifecycle, one-time join tokens, teardown
   tls.js         self-signed cert, generated once and persisted to DATA_DIR
-  stt.js         sherpa-onnx wrapper: VAD -> streaming ASR -> speaker embedding
+  stt.js         sherpa-onnx wrapper: VAD + far-mic gate on this thread,
+                 decode dispatched to the worker pool below
+  stt-worker.js  worker thread: owns the ASR + speaker-embedding models, so a
+                 synchronous native decode never blocks the game loop
   arbiter.js     cross-device dedup (same shout, several phones) + voice match
 
 client/src/
   GameContext.tsx   socket connection, rejoin, clock-skew offset, game state
   socket.ts         socket.io client singleton + identity persistence
   useOpenMic.ts     getUserMedia -> AudioWorklet -> 16kHz frames over the socket
+  useVoiceEnroll.ts one-shot voiceprint recording, shared by the mic toggle
+                    (first-time enrollment) and VoiceEnroll (re-record)
   types.ts          shared types, team/round label+color/icon maps
   screens/          Landing, Lobby, Writing, Turn, RoundIntermission, Scores
   alert.ts          all game sounds + vibration (Web Audio, no asset shipped)
@@ -94,7 +99,8 @@ client/src/
                     RulesDialog,
                     PlayerName, MyNameBadge, AdminDrawer, Toast,
                     SoundToggle, GameSounds, TurnChat (text + voice audit
-                    trail), VoiceEnroll (one-shot voiceprint recording)
+                    trail, live mic meter + sensitivity), VoiceEnroll
+                    (one-shot voiceprint recording)
 
 public/
   audio-worklet.js  mic downsampling — plain script, deliberately unbundled
@@ -190,23 +196,40 @@ In order:
 
 1. **Capture** (client): `getUserMedia` (open mic, no push-to-talk) feeds an
    `AudioWorklet` (`public/audio-worklet.js`) that downsamples whatever rate
-   the device gives to 16kHz mono Int16 and streams ~250ms frames over the
+   the device gives to 16kHz mono Int16 and streams ~120ms frames over the
    existing socket as `audio-frame` — `.volatile.emit`, so a frame queued
    behind a dropped connection is discarded rather than delivered stale.
    Kept short deliberately: whatever's left in the buffer when someone stops
    talking waits for the next full frame before the server's VAD even sees
    the silence that ends the segment — that tail wait was the visible
-   majority of the delay before a line showed up.
-2. **VAD** (server, per socket): silero-vad gates everything downstream —
-   ASR only runs on segments it flags as actual speech, which is most of the
-   CPU story on a NAS of uncertain power. Each segment is widened with ~300ms
-   of **pre-roll** audio the segmenter keeps in its own rolling buffer: the
-   VAD marks speech from where it is *confident*, which reliably clips a
-   quiet leading word ("The Tooth Fairy" came back as "Tooth fairy" until
-   this was added). Tuning the VAD's thresholds instead was tried and
-   rejected — the only value that recovered the word was also the most eager
-   to call a cough speech.
-3. **ASR** (server, shared across the room): transcribes each segment in
+   majority of the delay before a line showed up. `FRAME_MS` and
+   `AUDIO_FRAME_BURST` (server/events.js) move together: halving the frame
+   size doubles the frame rate, and the rate limiter has to be raised to match
+   or normal speech is throttled mid-sentence.
+2. **VAD** (server, per socket, on the main thread): silero-vad gates
+   everything downstream — ASR only runs on segments it flags as actual
+   speech, which is most of the CPU story on a NAS of uncertain power. It
+   stays on the main thread on purpose: measured at 0.647ms per 250ms frame
+   (0.26% of a core per live mic), so shipping every frame to a worker would
+   cost more than it saves. Each segment is widened with ~300ms of
+   **pre-roll** audio the segmenter keeps in its own rolling buffer: the VAD
+   marks speech from where it is *confident*, which reliably clips a quiet
+   leading word ("The Tooth Fairy" came back as "Tooth fairy" until this was
+   added). Tuning the VAD's thresholds instead was tried and rejected — the
+   only value that recovered the word was also the most eager to call a cough
+   speech. `PS_VAD_MIN_SILENCE` (default 0.3s) is how much quiet ends an
+   utterance, and it is paid as latency on every single line.
+3. **Far-mic gate** (server): a phone across the room clears the VAD's
+   "is this speech" bar and then produces confident nonsense ("When an
+   alcoholism"). Segments below an RMS floor, or shorter than ~0.35s, are
+   dropped *before* they reach the decode queue — so they cost no decode slot
+   either, making this a latency win as well as a quality one. The floor is
+   per **device**, not per room (being far away is a property of your phone):
+   clients send their own with `mic-on`, and the server clamps it rather than
+   trusting it. The chat panel shows a live level meter with the threshold
+   drawn on it, so "does my voice clear the line" is visible rather than
+   guesswork.
+4. **ASR** (server, in worker threads, shared across the room): transcribes each segment in
    whichever single language the room picked (**Voice language** in lobby
    settings — English or 中文, never both). A combined bilingual model was
    tried first and dropped: trained on Mandarin/English code-switching
@@ -220,6 +243,20 @@ In order:
    cap (`PS_STT_MAX_CONCURRENT`) — excess load sheds the oldest queued
    segment rather than letting transcription lag pile up.
 
+   Decoding happens in **worker threads** (`server/stt-worker.js`), because
+   sherpa's decode is a synchronous native call: on the main thread it blocked
+   the event loop outright, so one person's sentence stalled the turn timer's
+   broadcasts and every other room on the box. It also made
+   `PS_STT_MAX_CONCURRENT` a fiction — four "concurrent" decodes were four
+   serial ones sharing a thread (measured: 0.551x single-stream vs 2.175x for
+   four). It now genuinely *is* the worker count, and defaults to **1**,
+   because each worker loads its own ~700MB copy of the models; one is enough
+   to keep the event loop free, and more only buys real parallelism at 700MB a
+   head. The main thread holds nothing but the 632KB VAD. `PS_STT_THREADS`
+   (threads *within* one decode, default `min(4, cores)`) is the cheaper dial:
+   measured 2.6x, RTF 0.088 → 0.034. If the workers can't start at all, decode
+   silently falls back in-process — slower voice chat beats no voice chat.
+
    Which model each language uses is a `scripts/fetch-models.sh` concern, not
    a code one: every language directory carries a `model.json` naming its
    `kind` (`offline`/`online`), so swapping in a lighter model is a URL
@@ -229,17 +266,19 @@ In order:
    ./scripts/fetch-models.sh` switches to the lighter fallback. Models are
    fetched onto the host and bind-mounted into the container rather than
    baked into the image — see [Deployment](DEPLOYMENT.md#voice-models).
-4. **Cross-device dedup** (`server/arbiter.js`): the same shout often lands on
-   several phones. Utterances are held ~0.4s (`PS_VOICE_SETTLE_MS`), clustered
+5. **Cross-device dedup** (`server/arbiter.js`): the same shout often lands on
+   several phones. Utterances are held ~0.25s (`PS_VOICE_SETTLE_MS`), clustered
    by time overlap + text similarity, and only the best capture (loudest, then
    longest) becomes one chat line — this alone fixes the common case, since
    the true speaker's own phone usually also heard them. This is pure added
    latency for the (common) single-speaker case, so it's kept short — long
-   enough to absorb two phones' VAD/network jitter, not much more.
-5. **Voice match** (optional, per player): a speaker-embedding model fingerprints
+   enough to absorb two phones' VAD/network jitter, not much more — and
+   **skipped entirely when only one mic is live in the room**, where nothing
+   can arrive to dedup against and the wait would buy nothing at all.
+6. **Voice match** (optional, per player): a speaker-embedding model fingerprints
    each utterance and compares it against anyone who recorded a sample via the
    **Voice ID** button. A confident match (`PS_VOICE_EMBEDDING_THRESHOLD`)
-   overrides step 4's guess — this is what's actually needed when the true
+   overrides step 5's guess — this is what's actually needed when the true
    speaker's *own* phone never captured them at all (pocket, far corner of the
    room), not just when several phones did.
 

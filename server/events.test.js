@@ -984,6 +984,71 @@ test('chat is cleared at the start of every round, not carried forward', async (
   assert.equal(getState().round.chat.length, 0, 'new round starts with an empty transcript');
 });
 
+function chatUpdatesOf(socket) {
+  const updated = [];
+  const deleted = [];
+  socket.on('chat-message-updated', (m) => updated.push(m));
+  socket.on('chat-message-deleted', (m) => deleted.push(m));
+  return { updated, deleted };
+}
+
+test('chat-edit: corrects your own message and marks it edited, for everyone', async () => {
+  const { socks } = await fullRoomToRound1();
+  const senderLog = chatLogOf(socks[0]);
+  const otherUpdates = chatUpdatesOf(socks[1]);
+
+  await ack(socks[0], 'chat-send', { text: 'I said Too' });
+  await wait(30);
+  const { id } = senderLog[0];
+
+  const res = await ack(socks[0], 'chat-edit', { id, text: '  I said Too, not True  ' });
+  assert.equal(res.ok, true);
+  await wait(30);
+
+  assert.equal(otherUpdates.updated.length, 1);
+  assert.equal(otherUpdates.updated[0].text, 'I said Too, not True'); // trimmed
+  assert.equal(otherUpdates.updated[0].edited, true);
+});
+
+test('chat-edit: refused for someone else\'s message, and for a blank correction', async () => {
+  const { socks } = await fullRoomToRound1();
+  const senderLog = chatLogOf(socks[0]);
+  await ack(socks[0], 'chat-send', { text: 'original' });
+  await wait(30);
+  const { id } = senderLog[0];
+
+  const stolen = await ack(socks[1], 'chat-edit', { id, text: 'not yours to edit' });
+  assert.equal(stolen.ok, false);
+  assert.match(stolen.error, /your own/);
+
+  const blanked = await ack(socks[0], 'chat-edit', { id, text: '   ' });
+  assert.equal(blanked.ok, false);
+  assert.match(blanked.error, /delete/);
+
+  const missing = await ack(socks[0], 'chat-edit', { id: 'no-such-id', text: 'x' });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error, /not found/);
+});
+
+test('chat-delete: removes your own message for everyone, refused for someone else\'s', async () => {
+  const { socks } = await fullRoomToRound1();
+  const senderLog = chatLogOf(socks[0]);
+  const otherUpdates = chatUpdatesOf(socks[1]);
+  await ack(socks[0], 'chat-send', { text: 'oops' });
+  await wait(30);
+  const { id } = senderLog[0];
+
+  const stolen = await ack(socks[1], 'chat-delete', { id });
+  assert.equal(stolen.ok, false);
+  assert.match(stolen.error, /your own/);
+
+  const res = await ack(socks[0], 'chat-delete', { id });
+  assert.equal(res.ok, true);
+  await wait(30);
+
+  assert.deepEqual(otherUpdates.deleted, [{ id }]);
+});
+
 test('chat-send is rate-limited per socket', async () => {
   const { socks } = await fullRoomToRound1();
   const results = [];

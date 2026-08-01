@@ -106,9 +106,10 @@ export function FoldingSlip({ text, index, total }: { text: string; index: numbe
 
 /** The box they go into. Arrives first and stays put — the slips move, not it.
  *
- *  Plainly centred, which only works because the dice buttons are unmounted for
- *  the duration: while they were still there the rows were narrower than the
- *  screen and the slips fell past the box's edge. */
+ *  Offset left by the dice column (see .foldaway-box), because those buttons
+ *  stay in the layout while folding — hidden, but holding their space, so the
+ *  slips never jump sideways at the moment the fold starts. That means the
+ *  paper is narrower than the row, and centring on the row would miss it. */
 export function SlipBox() {
   const reduceMotion = useReducedMotion();
   return (

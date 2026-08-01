@@ -5,7 +5,7 @@ import * as persist from './persist.js';
 import * as suggestions from './suggestions.js';
 import * as bots from './bots.js';
 import { SettleBuffer, matchEnrolledSpeaker } from './arbiter.js';
-import { LANGUAGES as VOICE_LANGUAGES } from './stt.js';
+import { LANGUAGES as VOICE_LANGUAGES, DEFAULT_MIN_ENERGY } from './stt.js';
 
 const ROUND_PHASES = ['ROUND1', 'ROUND2', 'ROUND3'];
 const INVALID_NAME = 'Invalid name — that prefix is reserved for bots';
@@ -32,6 +32,28 @@ function enrolledEmbeddingsFor(room) {
 // live timer, same reasoning as round.timeoutHandle never being persisted.
 const voiceBuffers = new Map(); // room code -> SettleBuffer
 
+// Which sockets currently have a live mic, per room. Only used to answer "is
+// anyone else even listening?" — with one mic in the room there is nothing to
+// dedup against, so the settle window below is pure latency and gets skipped.
+const liveMics = new Map(); // room code -> Set of socket ids
+
+function addLiveMic(code, socketId) {
+  let set = liveMics.get(code);
+  if (!set) liveMics.set(code, (set = new Set()));
+  set.add(socketId);
+}
+
+function removeLiveMic(code, socketId) {
+  const set = liveMics.get(code);
+  if (!set) return;
+  set.delete(socketId);
+  if (set.size === 0) liveMics.delete(code);
+}
+
+function soloMic(code) {
+  return (liveMics.get(code)?.size ?? 0) <= 1;
+}
+
 // Overridable so tests don't have to burn real wall-clock time per assertion.
 // 250ms, down from an original 800ms: this is pure added latency for the
 // common case (one speaker, nobody to dedup against). Two phones hearing the
@@ -51,6 +73,7 @@ function voiceBufferFor(io, room) {
 function forgetVoiceBuffer(code) {
   voiceBuffers.get(code)?.flushNow();
   voiceBuffers.delete(code);
+  liveMics.delete(code);
 }
 
 /** The settle window's flush callback — fires up to ~0.8s after the winning
@@ -231,6 +254,16 @@ function clampInt(value, min, max, fallback) {
   return Math.max(min, Math.min(max, n));
 }
 
+/** clampInt's fractional twin — the mic sensitivity floor is an RMS value in
+ *  the 0..0.2 range, so truncating it to an integer would flatten every
+ *  setting to 0. Same NaN-guard reasoning: `{}` or "abc" must land on the
+ *  default rather than writing NaN into a comparison that then never matches. */
+function clampFloat(value, min, max, fallback) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
 export function registerSocketHandlers(io, socket, stt = null) {
   /**
    * Every handler is registered through here rather than socket.on directly.
@@ -298,7 +331,11 @@ export function registerSocketHandlers(io, socket, stt = null) {
   // A one-shot enrollment clip, not a stream — generous enough for an ~8s
   // recording (16kHz * 2 bytes/sample * 8s = 256KB) with room to spare.
   const ENROLL_MAX_BYTES = 320 * 1024;
-  const AUDIO_FRAME_BURST = 20;
+  // Frames are 120ms now (was 250ms — shorter frames mean the tail of an
+  // utterance reaches the VAD sooner), so ~16.7 arrive per window rather than
+  // 8. Raised to keep roughly the same headroom over the real cadence; at the
+  // old 20 a normal speaker would have been rate-limited mid-sentence.
+  const AUDIO_FRAME_BURST = 40;
   const AUDIO_FRAME_WINDOW_MS = 2_000;
   let audioFrameTimes = [];
   function allowAudioFrame() {
@@ -314,9 +351,16 @@ export function registerSocketHandlers(io, socket, stt = null) {
   // it's per-connection, not per-player, so a reconnect starts clean rather
   // than inheriting a stale native handle from a socket that's already gone.
   let micSession = null;
+  // Remembered separately from socket.data.roomCode: a disconnect can clear
+  // the socket's room before this runs, and a mic left in `liveMics` would
+  // permanently convince the room it has two listeners — reinstating the
+  // settle-window latency for everyone with nothing to dedup against.
+  let micRoomCode = null;
   function closeMicSession() {
     micSession?.close();
     micSession = null;
+    if (micRoomCode) removeLiveMic(micRoomCode, socket.id);
+    micRoomCode = null;
   }
 
   // socket.data.{roomCode, playerId} set once on join/rejoin; every later
@@ -693,22 +737,79 @@ export function registerSocketHandlers(io, socket, stt = null) {
     ack?.({ ok: true });
   });
 
+  // Correcting your own line — mainly for voice: the ASR sometimes mishears
+  // ("Too" landing as "True."), and there was previously no way to fix that
+  // short of it sitting there wrong for the rest of the round. Scoped to only
+  // the message's own author, same as everything else here trusting
+  // ctx.player rather than anything the client asserts about identity.
+  // `edited` is kept and shown in the log rather than silently rewriting
+  // history — this transcript is a dispute-resolution tool, so a correction
+  // has to be visibly a correction, not indistinguishable from what was
+  // actually said at the time.
+  on('chat-edit', ({ id, text } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
+    if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no round in progress' });
+    const message = ctx.room.round.chat.find((m) => m.id === id);
+    if (!message) return ack?.({ ok: false, error: 'message not found' });
+    if (message.playerId !== ctx.player.id) return ack?.({ ok: false, error: 'you can only edit your own messages' });
+    const trimmed = String(text ?? '').trim().slice(0, 200);
+    if (!trimmed) return ack?.({ ok: false, error: 'message can\'t be empty — delete it instead' });
+    if (!allowChat()) return ack?.({ ok: false, error: 'slow down — try again in a moment' });
+
+    message.text = trimmed;
+    message.edited = true;
+    persist.saveRoom(ctx.room);
+    io.to(ctx.room.code).emit('chat-message-updated', message);
+    ack?.({ ok: true });
+  });
+
+  on('chat-delete', ({ id } = {}, ack) => {
+    const ctx = context();
+    if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
+    if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
+    if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no round in progress' });
+    const index = ctx.room.round.chat.findIndex((m) => m.id === id);
+    if (index === -1) return ack?.({ ok: false, error: 'message not found' });
+    if (ctx.room.round.chat[index].playerId !== ctx.player.id) {
+      return ack?.({ ok: false, error: 'you can only delete your own messages' });
+    }
+    if (!allowChat()) return ack?.({ ok: false, error: 'slow down — try again in a moment' });
+
+    ctx.room.round.chat.splice(index, 1);
+    persist.saveRoom(ctx.room);
+    io.to(ctx.room.code).emit('chat-message-deleted', { id });
+    ack?.({ ok: true });
+  });
+
   // Open mic: same audit trail as chat-send, just fed by voice-to-text instead
   // of typing. `stt` is the whole server's shared engine (models + one
   // NAS-wide concurrency-capped decode queue, see stt.js) — null when the box
   // has no model files, exactly like a missing TLS cert disables https rather
   // than crashing the app.
-  on('mic-on', (_data, ack) => {
+  on('mic-on', (data, ack) => {
     const ctx = context();
     if (!ctx) return ack?.({ ok: false, error: 'not in a room' });
     if (!ctx.room.config.chatEnabled) return ack?.({ ok: false, error: 'chat is turned off for this room' });
     if (!ROUND_PHASES.includes(ctx.room.phase)) return ack?.({ ok: false, error: 'no round in progress' });
     if (!stt) return ack?.({ ok: false, error: 'voice capture is not available on this server' });
     closeMicSession(); // re-enabling mid-session (e.g. after a drop) starts clean, not doubled up
+    micRoomCode = ctx.room.code;
+    addLiveMic(micRoomCode, socket.id);
     micSession = stt.createSession({
       // fixed for this session's lifetime — changing the room's language
       // mid-stream takes effect on the next mic-on, not retroactively
       language: ctx.room.config.voiceLanguage,
+      // How loud a segment has to be before it's worth decoding. Comes from
+      // the device (a phone across the table needs a different floor than one
+      // in your hand) but is clamped here rather than trusted — same treatment
+      // as every other client-supplied number, see clampInt above.
+      minEnergy: clampFloat(data?.minEnergy, 0, 0.2, DEFAULT_MIN_ENERGY),
+      // Nobody enrolled means nothing to match a voiceprint against, so
+      // computing one per utterance is pure latency. Attribution falls back to
+      // the device prior + dedup, which is the documented no-enrollment path.
+      wantEmbedding: [...ctx.room.players.values()].some((p) => p.voiceEmbedding),
       // Not posted directly: handed to the room's cross-device dedup buffer
       // (server/arbiter.js), which holds it for a short settle window in case
       // another phone's mic caught the same shout, then delivers the best
@@ -718,7 +819,11 @@ export function registerSocketHandlers(io, socket, stt = null) {
       onFinal: (text, meta) => {
         const c = context();
         if (!c || !c.room.config.chatEnabled || !ROUND_PHASES.includes(c.room.phase)) return;
-        voiceBufferFor(io, c.room).submit({ playerId: c.player.id, text: text.slice(0, 200), ...meta });
+        const buf = voiceBufferFor(io, c.room);
+        buf.submit({ playerId: c.player.id, text: text.slice(0, 200), ...meta });
+        // One live mic in the room: nothing can arrive to dedup against, so
+        // waiting out the settle window would just be latency for its own sake.
+        if (soloMic(c.room.code)) buf.flushNow();
       },
       onWarn: (err) => console.warn(`voice: session error for socket ${socket.id}:`, err.message),
     });

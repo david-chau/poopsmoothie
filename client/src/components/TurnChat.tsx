@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { emitAck, onVoiceAvailable, voiceHttpsUrl } from '../socket';
-import { useOpenMic } from '../useOpenMic';
+import { useOpenMic, MIN_ENERGY_RANGE } from '../useOpenMic';
 import { useVoiceEnroll } from '../useVoiceEnroll';
 import VoiceEnroll from './VoiceEnroll';
 import { TEAM_CLASS, type ChatMessage } from '../types';
@@ -124,6 +124,19 @@ export default function TurnChat() {
     else setError(res.error ?? 'could not send');
   }
 
+  /** Corrects a line you sent — mainly for a voice mishear ("Too" landing as
+   *  "True."). Server re-checks it's actually your own message; the update
+   *  arrives back over the socket (GameContext's chat-message-updated), same
+   *  as any other player would see it, rather than trusted optimistically. */
+  async function editMessage(id: string, text: string) {
+    const res = await emitAck<{ ok: boolean; error?: string }>('chat-edit', { id, text });
+    return res;
+  }
+
+  async function deleteMessage(id: string) {
+    return emitAck<{ ok: boolean; error?: string }>('chat-delete', { id });
+  }
+
   if (!state) return null;
 
   return (
@@ -151,11 +164,12 @@ export default function TurnChat() {
                 : voiceEnrolled
                   ? '🎤 Off'
                   : '🎙️ Record 5s sample'}
-            {mic.on && (
-              <span className="turn-chat-mic-level" style={{ opacity: Math.min(1, 0.25 + mic.level * 6) }} />
-            )}
           </button>
         )}
+        {/* level + threshold live next to the toggle they belong to, rather
+            than in a block of their own — as a boxed row with its own caption
+            they cost more vertical space than the chat log they sat above */}
+        {micVisible && mic.on && <MicMeter level={mic.level} sensitivity={mic.sensitivity} onChange={mic.setSensitivity} />}
         <div className="turn-chat-filters" role="group" aria-label="Filter chat">
           {(['all', 'team', 'drawer'] as Filter[]).map((f) => (
             <button
@@ -183,7 +197,13 @@ export default function TurnChat() {
       <ul className="turn-chat-log" ref={listRef} onScroll={handleScroll}>
         {visible.length === 0 && <li className="turn-chat-empty">Nothing here yet.</li>}
         {visible.map((m) => (
-          <ChatRow key={m.id} message={m} />
+          <ChatRow
+            key={m.id}
+            message={m}
+            isMine={m.playerId === identity?.playerId}
+            onEdit={editMessage}
+            onDelete={deleteMessage}
+          />
         ))}
       </ul>
 
@@ -209,13 +229,129 @@ export default function TurnChat() {
   );
 }
 
+/** The meter's full-scale RMS. Normal speech at arm's length sits around
+ *  0.05-0.15, so showing the full 0..1 range would squash every real reading
+ *  into the leftmost sliver and make the threshold impossible to judge. */
+const METER_FULL_SCALE = 0.25;
+
+const pct = (v: number) => `${Math.min(100, Math.max(0, (v / METER_FULL_SCALE) * 100))}%`;
+
+/**
+ * Live input level with the cutoff drawn on top of it. The number that
+ * matters isn't the level or the threshold alone, it's whether one clears the
+ * other — so they share one bar rather than sitting in separate widgets: talk
+ * normally, and if the fill doesn't pass the marker, the server is discarding
+ * you. Bar segments past the marker are tinted to make "this counts" obvious
+ * without needing the legend.
+ */
+function MicMeter({
+  level,
+  sensitivity,
+  onChange,
+}: {
+  level: number;
+  sensitivity: number;
+  onChange: (v: number) => void;
+}) {
+  const passing = level >= sensitivity;
+  return (
+    <div className="mic-meter" title="Live input level. Your speech should push the bar past the line — drag the slider right to ignore more distant/quiet sound.">
+      <div className="mic-meter-bar" role="presentation">
+        <div className={`mic-meter-fill${passing ? ' mic-meter-fill-passing' : ''}`} style={{ width: pct(level) }} />
+        <div className="mic-meter-threshold" style={{ left: pct(sensitivity) }} />
+      </div>
+      <input
+        className="mic-meter-slider"
+        type="range"
+        min={MIN_ENERGY_RANGE.min}
+        max={MIN_ENERGY_RANGE.max}
+        step={0.002}
+        value={sensitivity}
+        onChange={(e) => onChange(Number(e.target.value))}
+        aria-label="Mic sensitivity"
+      />
+    </div>
+  );
+}
+
 /** Clock time, not "3s ago" — the whole point of this log is settling "who
  *  said what, when", and a relative label needs re-rendering to stay true. */
 function clockTime(at: number) {
   return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 }
 
-function ChatRow({ message }: { message: ChatMessage }) {
+function ChatRow({
+  message,
+  isMine,
+  onEdit,
+  onDelete,
+}: {
+  message: ChatMessage;
+  isMine: boolean;
+  onEdit: (id: string, text: string) => Promise<{ ok: boolean; error?: string }>;
+  onDelete: (id: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(message.text);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function save() {
+    const trimmed = draft.trim();
+    if (!trimmed) return setError('message can\'t be empty — delete it instead');
+    if (trimmed === message.text) return setEditing(false); // nothing actually changed
+    setBusy(true);
+    setError(null);
+    const res = await onEdit(message.id, trimmed);
+    setBusy(false);
+    if (res.ok) setEditing(false);
+    else setError(res.error ?? 'could not save');
+  }
+
+  async function del() {
+    setBusy(true);
+    const res = await onDelete(message.id);
+    setBusy(false);
+    // a failure here (round already moved on, connection dropped) leaves the
+    // row as-is rather than silently vanishing something that didn't delete
+    if (!res.ok) setError(res.error ?? 'could not delete');
+  }
+
+  if (editing) {
+    return (
+      <li className="turn-chat-row turn-chat-row-editing">
+        <input
+          className="turn-chat-edit-input"
+          value={draft}
+          autoFocus
+          maxLength={200}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') save();
+            if (e.key === 'Escape') setEditing(false);
+          }}
+        />
+        <button className="turn-chat-row-action" disabled={busy} onClick={save} aria-label="Save correction" title="Save">
+          ✓
+        </button>
+        <button
+          className="turn-chat-row-action"
+          disabled={busy}
+          onClick={() => {
+            setEditing(false);
+            setError(null);
+          }}
+          aria-label="Cancel edit"
+          title="Cancel"
+        >
+          ✕
+        </button>
+        {error && <span className="error turn-chat-row-error">{error}</span>}
+      </li>
+    );
+  }
+
   return (
     <li className="turn-chat-row">
       <span className="turn-chat-time">{clockTime(message.at)}</span>
@@ -231,6 +367,32 @@ function ChatRow({ message }: { message: ChatMessage }) {
         </span>
       )}
       <span className="turn-chat-text">{message.text}</span>
+      {message.edited && (
+        <span className="turn-chat-edited" title="Corrected by whoever sent it">
+          (edited)
+        </span>
+      )}
+      {isMine && (
+        <span className="turn-chat-row-actions">
+          <button
+            className="turn-chat-row-action"
+            disabled={busy}
+            onClick={() => {
+              setDraft(message.text);
+              setError(null);
+              setEditing(true);
+            }}
+            aria-label="Edit your message"
+            title="Edit — e.g. fix a voice mishear"
+          >
+            ✏️
+          </button>
+          <button className="turn-chat-row-action" disabled={busy} onClick={del} aria-label="Delete your message" title="Delete">
+            🗑️
+          </button>
+        </span>
+      )}
+      {error && <span className="error turn-chat-row-error">{error}</span>}
     </li>
   );
 }

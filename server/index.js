@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -24,6 +25,14 @@ function positiveIntEnv(name, fallback) {
   const n = Math.trunc(Number(process.env[name]));
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
+
+// Threads *within* one decode. Measured 2.6x on an 8-core box (RTF 0.088 ->
+// 0.034) and sherpa's own ARM numbers agree (0.220 -> 0.088 on an RK3588), so
+// this is the cheapest latency win available — it was defaulting to 1.
+// Capped at 4 and at the machine's own core count: past that the threads
+// contend more than they help, and a 2-core NAS shouldn't oversubscribe
+// itself while the game loop is trying to run on the same cores.
+const STT_THREADS = positiveIntEnv('PS_STT_THREADS', Math.max(1, Math.min(4, os.availableParallelism())));
 
 // gap #2: reload persisted rooms, then force any mid-turn room to a paused
 // state — the in-memory setTimeout and wall-clock trust are both gone after a restart.
@@ -70,16 +79,24 @@ const httpServer = createServer(app);
 // has the host's "Skip stuck drawer" as an immediate manual escape.
 const io = new Server(httpServer, { pingInterval: 25000, pingTimeout: 60000 });
 
-// Voice capture (open mic -> VAD -> streaming ASR, see stt.js) needs a
-// native addon plus ~100MB of ONNX models that only exist once the Docker
-// image's `models` build stage has fetched them. Same "optional, never
-// fatal" shape as the HTTPS cert below: a dev box or an image built without
-// them just runs text-chat-only, logged once, nothing else affected.
+// Voice capture (open mic -> VAD -> ASR, see stt.js) needs a native addon
+// plus ONNX models that are fetched onto the host separately and mounted in
+// (scripts/fetch-models.sh). Same "optional, never fatal" shape as the HTTPS
+// cert below: a dev box or a host without them just runs text-chat-only,
+// logged once, nothing else affected.
+//
+// Decode runs in worker threads, so `maxConcurrent` is also the worker count
+// — and each worker holds its own ~700MB copy of the models, which is why
+// this defaults to 1 rather than the 4 it used to claim. One worker is enough
+// to keep the event loop free; more only buys real parallelism, at 700MB each.
 let sttEngine = null;
 try {
-  const models = await stt.loadModels(STT_MODEL_DIR, { numThreads: positiveIntEnv('PS_STT_THREADS', 1) });
-  sttEngine = stt.createEngine(models, { maxConcurrent: positiveIntEnv('PS_STT_MAX_CONCURRENT', 4) });
-  console.log('voice capture: models loaded, open-mic transcription is available');
+  sttEngine = await stt.startEngine(STT_MODEL_DIR, {
+    numThreads: STT_THREADS,
+    maxConcurrent: positiveIntEnv('PS_STT_MAX_CONCURRENT', 1),
+  });
+  const where = sttEngine.workers ? `${sttEngine.workers} worker thread(s)` : 'in-process';
+  console.log(`voice capture: models loaded (${where}, ${STT_THREADS} threads each), open-mic transcription is available`);
 } catch (err) {
   console.warn(`voice capture unavailable, text chat still works (${err.message})`);
 }

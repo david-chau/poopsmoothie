@@ -415,6 +415,11 @@ test('a voice message already settling is dropped if chat gets turned off before
 
   await ack(socks[0], 'mic-on');
   const session = engine.sessions.at(-1);
+  // A second live mic is what keeps the settle window in play at all: with
+  // only one, there is nothing that could arrive to dedup against, so the
+  // message is flushed immediately and never spends time "settling" (see the
+  // solo-mic test below). Two mics is the case this re-check exists for.
+  await ack(socks[1], 'mic-on');
   const now = Date.now();
   session.onFinal('about to get cut off', { energy: 0.5, t0: now - 400, t1: now });
   // the settle window is 20ms in this file (PS_VOICE_SETTLE_MS) — turn chat
@@ -423,6 +428,54 @@ test('a voice message already settling is dropped if chat gets turned off before
   await wait(60);
 
   assert.equal(log.length, 0); // deliverVoiceMessage's own chatEnabled re-check catches it
+});
+
+test('a solo mic posts without waiting out the settle window — nothing can arrive to dedup against', async () => {
+  const { socks } = await fullRoomToRound1();
+  const log = chatLogOf(socks[1]);
+
+  await ack(socks[0], 'mic-on');
+  const session = engine.sessions.at(-1);
+  const now = Date.now();
+  session.onFinal('straight through', { energy: 0.5, t0: now - 400, t1: now });
+  // deliberately shorter than PS_VOICE_SETTLE_MS (20ms): the point is that the
+  // line is already delivered rather than still being held
+  await wait(5);
+
+  assert.equal(log.length, 1);
+  assert.equal(log[0].text, 'straight through');
+});
+
+test('a second live mic reinstates the settle window, so both captures can be clustered', async () => {
+  const { socks } = await fullRoomToRound1();
+  const log = chatLogOf(socks[1]);
+
+  await ack(socks[0], 'mic-on');
+  const first = engine.sessions.at(-1);
+  await ack(socks[1], 'mic-on');
+  const now = Date.now();
+  first.onFinal('held briefly', { energy: 0.5, t0: now - 400, t1: now });
+  await wait(5);
+  assert.equal(log.length, 0, 'should still be settling, not posted yet');
+
+  await wait(60);
+  assert.equal(log.length, 1);
+});
+
+test('a mic going quiet again drops back to the no-wait solo path', async () => {
+  const { socks } = await fullRoomToRound1();
+  const log = chatLogOf(socks[1]);
+
+  await ack(socks[0], 'mic-on');
+  const first = engine.sessions.at(-1);
+  await ack(socks[1], 'mic-on');
+  await ack(socks[1], 'mic-off'); // back to one live mic
+
+  const now = Date.now();
+  first.onFinal('solo again', { energy: 0.5, t0: now - 400, t1: now });
+  await wait(5);
+
+  assert.equal(log.length, 1, 'mic-off should have released the room back to the fast path');
 });
 
 test('enroll-voice is rejected once chat is off', async () => {

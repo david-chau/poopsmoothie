@@ -24,3 +24,6 @@ services:
       - PS_STT_THREADS=${PS_STT_THREADS:-}
       - PS_VOICE_SETTLE_MS=${PS_VOICE_SETTLE_MS:-}
       - PS_VOICE_EMBEDDING_THRESHOLD=${PS_VOICE_EMBEDDING_THRESHOLD:-}
+      # how much trailing silence ends an utterance (seconds) — lower is
+      # snappier, too low splits a sentence at every breath
+      - PS_VAD_MIN_SILENCE=${PS_VAD_MIN_SILENCE:-}
