@@ -110,7 +110,10 @@ Configurable in the lobby, host-only, before the game starts:
   move anyone).
 - **Hot join** (default on) — latecomers can join a game already in progress.
 - **Chat & voice (beta)** (default off) — round chat plus open-mic voice
-  transcription, with a **Voice language** picker once it's on.
+  transcription, with a **Voice language** picker once it's on. Voice needs
+  models on the host first (not shipped in the image, to keep it small):
+  `./scripts/fetch-models.sh`, then restart the container. See
+  [Deployment](docs/DEPLOYMENT.md#voice-models).
 
 Also available while hosting: host-only **⚙️ Admin controls** during the game
 (pause, skip a stuck drawer, revert a score, remove a player, end the room),

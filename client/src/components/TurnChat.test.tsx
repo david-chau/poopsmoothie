@@ -4,20 +4,23 @@ import userEvent from '@testing-library/user-event';
 import { makeState } from '../test-fixtures';
 import type { ChatMessage } from '../types';
 
-const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoiceHttpsUrl } = vi.hoisted(() => ({
-  mockUseGame: vi.fn(),
-  mockEmitAck: vi.fn(),
-  // default: no voice on this server — every existing test in this file is
-  // exercising the Phase 1 text-only shape, so the mic button must stay gone
-  // unless a test opts in below
-  mockOnVoiceAvailable: vi.fn((fn: (v: boolean) => void) => {
-    fn(false);
-    return () => {};
-  }),
-  mockUseOpenMic: vi.fn(() => ({ on: false, level: 0, error: null, start: vi.fn(), stop: vi.fn() })),
-  // default: nothing to suggest (already secure, or no https listener)
-  mockVoiceHttpsUrl: vi.fn(() => null),
-}));
+const { mockUseGame, mockEmitAck, mockOnVoiceAvailable, mockUseOpenMic, mockVoiceHttpsUrl, mockUseVoiceEnroll, mockEnrollRecord } =
+  vi.hoisted(() => ({
+    mockUseGame: vi.fn(),
+    mockEmitAck: vi.fn(),
+    // default: no voice on this server — every existing test in this file is
+    // exercising the Phase 1 text-only shape, so the mic button must stay gone
+    // unless a test opts in below
+    mockOnVoiceAvailable: vi.fn((fn: (v: boolean) => void) => {
+      fn(false);
+      return () => {};
+    }),
+    mockUseOpenMic: vi.fn(() => ({ on: false, level: 0, error: null, start: vi.fn(), stop: vi.fn() })),
+    // default: nothing to suggest (already secure, or no https listener)
+    mockVoiceHttpsUrl: vi.fn(() => null),
+    mockEnrollRecord: vi.fn(),
+    mockUseVoiceEnroll: vi.fn(() => ({ recording: false, secondsLeft: 5, error: null, justEnrolled: false, record: mockEnrollRecord })),
+  }));
 vi.mock('../GameContext', () => ({ useGame: mockUseGame }));
 vi.mock('../socket', () => ({
   emitAck: mockEmitAck,
@@ -25,6 +28,7 @@ vi.mock('../socket', () => ({
   voiceHttpsUrl: mockVoiceHttpsUrl,
 }));
 vi.mock('../useOpenMic', () => ({ useOpenMic: mockUseOpenMic }));
+vi.mock('../useVoiceEnroll', () => ({ useVoiceEnroll: mockUseVoiceEnroll, DEFAULT_RECORD_SECONDS: 5 }));
 
 import TurnChat from './TurnChat';
 
@@ -53,6 +57,12 @@ function setup(chat: ChatMessage[], identityPlayerId = 'p1') {
 beforeEach(() => {
   vi.clearAllMocks();
   mockEmitAck.mockResolvedValue({ ok: true });
+  // reset explicitly rather than leaning on the hoisted defaults surviving
+  // clearAllMocks — it only clears call history, not a mockResolvedValue/
+  // mockReturnValue set by an earlier test (bit this file before, see the
+  // https-hint tests below)
+  mockEnrollRecord.mockResolvedValue(true);
+  mockUseVoiceEnroll.mockReturnValue({ recording: false, secondsLeft: 5, error: null, justEnrolled: false, record: mockEnrollRecord });
   localStorage.clear();
   // jsdom has no mediaDevices at all by default; stubbing it present (but not
   // exercised — useOpenMic itself is mocked above) lets the "voice available"
@@ -198,7 +208,7 @@ test('the mic toggle is hidden when this server has no voice capture', () => {
   expect(screen.queryByTitle(/table hear you/)).not.toBeInTheDocument();
 });
 
-test('the mic toggle appears once the server reports voice is available, and starts capture on click', async () => {
+test('already enrolled: clicking the mic toggle starts capture directly, without recording again', async () => {
   const user = userEvent.setup();
   const start = vi.fn();
   mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
@@ -206,12 +216,57 @@ test('the mic toggle appears once the server reports voice is available, and sta
     return () => {};
   });
   mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
-  setup([]);
+  mockUseGame.mockReturnValue({
+    state: makeState({
+      phase: 'ROUND1',
+      round: { ...makeState().round, chat: [] },
+      players: makeState().players.map((p) => (p.id === 'p1' ? { ...p, voiceEnrolled: true } : p)),
+    }),
+    identity: { playerId: 'p1' },
+    isDrawer: false,
+  });
   render(<TurnChat />);
 
   const toggle = screen.getByTitle(/table hear you/);
   await user.click(toggle);
+  expect(mockEnrollRecord).not.toHaveBeenCalled();
   expect(start).toHaveBeenCalled();
+});
+
+test('not yet enrolled: clicking the mic toggle records a sample first, then starts capture', async () => {
+  const user = userEvent.setup();
+  const start = vi.fn();
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(true);
+    return () => {};
+  });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
+  setup([]); // p1 has no voiceEnrolled flag -> not enrolled
+
+  render(<TurnChat />);
+  const toggle = screen.getByRole('button', { name: /Record 5s sample/ });
+  await user.click(toggle);
+
+  expect(mockEnrollRecord).toHaveBeenCalled();
+  expect(start).toHaveBeenCalled();
+});
+
+test('a failed enrollment recording does not start the mic', async () => {
+  const user = userEvent.setup();
+  const start = vi.fn();
+  mockEnrollRecord.mockResolvedValue(false);
+  mockOnVoiceAvailable.mockImplementation((fn: (v: boolean) => void) => {
+    fn(true);
+    return () => {};
+  });
+  mockUseOpenMic.mockReturnValue({ on: false, level: 0, error: null, start, stop: vi.fn() });
+  setup([]);
+
+  render(<TurnChat />);
+  await user.click(screen.getByRole('button', { name: /Record 5s sample/ }));
+
+  expect(mockEnrollRecord).toHaveBeenCalled();
+  expect(start).not.toHaveBeenCalled();
 });
 
 test('a listening mic renders as on and can be stopped from the same toggle', async () => {

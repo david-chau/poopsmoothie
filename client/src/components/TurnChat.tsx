@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useGame } from '../GameContext';
 import { emitAck, onVoiceAvailable, voiceHttpsUrl } from '../socket';
 import { useOpenMic } from '../useOpenMic';
+import { useVoiceEnroll } from '../useVoiceEnroll';
 import VoiceEnroll from './VoiceEnroll';
 import { TEAM_CLASS, type ChatMessage } from '../types';
 
@@ -43,6 +44,12 @@ function saveFilter(f: Filter) {
  * supports getUserMedia; otherwise this is exactly the Phase 1 text-only
  * component. A `via: 'voice'` message (🎤 marker) may have been captured by
  * this device's own mic or relayed by the server from someone else's.
+ *
+ * The toggle also *is* the enrollment flow the first time: a voiceprint has
+ * to exist before there's anything to match against, so tapping it when
+ * unenrolled records the sample first and only then starts listening,
+ * instead of a separate "Record a sample" control sitting next to an "on"
+ * button that's really a second step of the same action.
  */
 export default function TurnChat() {
   const { state, identity, isDrawer } = useGame();
@@ -52,6 +59,7 @@ export default function TurnChat() {
   const [busy, setBusy] = useState(false);
   const [voiceAvailable, setVoiceAvailable] = useState(false);
   const mic = useOpenMic();
+  const enroll = useVoiceEnroll();
   // recomputed per render rather than hoisted to module scope, so it reflects
   // this browser right now rather than whatever navigator looked like the
   // instant this module first loaded
@@ -72,6 +80,16 @@ export default function TurnChat() {
   const messages = state?.round.chat ?? [];
   const me = state?.players.find((p) => p.id === identity?.playerId);
   const myTeam = me?.team;
+  const voiceEnrolled = !!me?.voiceEnrolled || enroll.justEnrolled;
+
+  async function handleMicClick() {
+    if (mic.on) {
+      mic.stop();
+      return;
+    }
+    if (!voiceEnrolled && !(await enroll.record())) return;
+    mic.start();
+  }
 
   const visible = messages.filter((m) => {
     if (filter === 'drawer') return m.wasDrawer;
@@ -115,11 +133,24 @@ export default function TurnChat() {
         {micVisible && (
           <button
             className={`btn turn-chat-mic${mic.on ? ' turn-chat-mic-on' : ''}`}
-            onClick={() => (mic.on ? mic.stop() : mic.start())}
+            onClick={handleMicClick}
+            disabled={enroll.recording}
             aria-pressed={mic.on}
-            title={mic.on ? 'Mic is listening — tap to stop' : 'Tap to let the table hear you'}
+            title={
+              mic.on
+                ? 'Mic is listening — tap to stop'
+                : voiceEnrolled
+                  ? 'Tap to let the table hear you'
+                  : 'Tap to record a 5s voice sample, then start listening'
+            }
           >
-            {mic.on ? '🎤 On' : '🎤 Off'}
+            {enroll.recording
+              ? `Recording… ${enroll.secondsLeft}s`
+              : mic.on
+                ? '🎤 On'
+                : voiceEnrolled
+                  ? '🎤 Off'
+                  : '🎙️ Record 5s sample'}
             {mic.on && (
               <span className="turn-chat-mic-level" style={{ opacity: Math.min(1, 0.25 + mic.level * 6) }} />
             )}
@@ -139,7 +170,7 @@ export default function TurnChat() {
         </div>
       </div>
 
-      {micVisible && <VoiceEnroll enrolled={!!me?.voiceEnrolled} />}
+      {micVisible && <VoiceEnroll enrolled={voiceEnrolled} />}
 
       {httpsUrl && (
         <p className="turn-chat-https-hint">
@@ -173,6 +204,7 @@ export default function TurnChat() {
       </div>
       {error && <p className="error">{error}</p>}
       {mic.error && <p className="error">Mic: {mic.error}</p>}
+      {enroll.error && <p className="error">Voice ID: {enroll.error}</p>}
     </div>
   );
 }

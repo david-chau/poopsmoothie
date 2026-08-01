@@ -1,5 +1,5 @@
 import { test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const { mockEmitAck } = vi.hoisted(() => ({ mockEmitAck: vi.fn() }));
@@ -36,10 +36,13 @@ beforeEach(() => {
   vi.stubGlobal('AudioContext', FakeAudioContext);
 });
 
-test('shows "not set up" and a record button when the player has no voiceprint yet', () => {
-  render(<VoiceEnroll enrolled={false} />);
-  expect(screen.getByText('🎙️ Voice ID not set up')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Record 5s sample' })).toBeInTheDocument();
+// A real (short) recordSeconds keeps these fast without fighting fake timers
+// against getUserMedia's real Promise chain — see the hook's own comment.
+const FAST_SECONDS = 0.03;
+
+test('renders nothing before enrollment — the mic toggle handles the first sample', () => {
+  const { container } = render(<VoiceEnroll enrolled={false} />);
+  expect(container).toBeEmptyDOMElement();
 });
 
 test('shows "ready" and a re-record option once enrolled', () => {
@@ -48,15 +51,11 @@ test('shows "ready" and a re-record option once enrolled', () => {
   expect(screen.getByRole('button', { name: 'Re-record' })).toBeInTheDocument();
 });
 
-// A real (short) recordSeconds keeps these fast without fighting fake timers
-// against getUserMedia's real Promise chain — see the component's own comment.
-const FAST_SECONDS = 0.03;
-
-test('recording sends the captured audio and reports success', async () => {
+test('re-recording sends the captured audio and stays "ready"', async () => {
   const user = userEvent.setup();
-  render(<VoiceEnroll enrolled={false} recordSeconds={FAST_SECONDS} />);
+  render(<VoiceEnroll enrolled={true} recordSeconds={FAST_SECONDS} />);
 
-  await user.click(screen.getByRole('button', { name: /Record .*sample/ }));
+  await user.click(screen.getByRole('button', { name: 'Re-record' }));
   expect(mockGetUserMedia).toHaveBeenCalledWith(
     expect.objectContaining({ audio: expect.objectContaining({ echoCancellation: true, autoGainControl: false }) }),
   );
@@ -65,27 +64,26 @@ test('recording sends the captured audio and reports success', async () => {
     instances[0]?.port.onmessage?.({ data: new ArrayBuffer(8) } as MessageEvent);
   });
 
-  expect(await screen.findByText('🎙️ Voice ID ready', {}, { timeout: 2000 })).toBeInTheDocument();
-  expect(mockEmitAck).toHaveBeenCalledWith('enroll-voice', expect.any(ArrayBuffer));
-  expect(screen.getByRole('button', { name: 'Re-record' })).toBeInTheDocument();
+  await waitFor(() => expect(mockEmitAck).toHaveBeenCalledWith('enroll-voice', expect.any(ArrayBuffer)), { timeout: 2000 });
+  expect(await screen.findByRole('button', { name: 'Re-record' })).not.toBeDisabled();
 });
 
 test('a rejected mic permission surfaces an error without crashing', async () => {
   mockGetUserMedia.mockRejectedValue(new Error('Permission denied'));
   const user = userEvent.setup();
-  render(<VoiceEnroll enrolled={false} recordSeconds={FAST_SECONDS} />);
+  render(<VoiceEnroll enrolled={true} recordSeconds={FAST_SECONDS} />);
 
-  await user.click(screen.getByRole('button', { name: /Record .*sample/ }));
+  await user.click(screen.getByRole('button', { name: 'Re-record' }));
   expect(await screen.findByText(/Permission denied/)).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Record .*sample/ })).not.toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Re-record' })).not.toBeDisabled();
 });
 
-test('a server-side enrollment failure is surfaced and does not claim success', async () => {
+test('a server-side enrollment failure is surfaced without losing the existing "ready" status', async () => {
   mockEmitAck.mockResolvedValue({ ok: false, error: 'could not process recording' });
   const user = userEvent.setup();
-  render(<VoiceEnroll enrolled={false} recordSeconds={FAST_SECONDS} />);
+  render(<VoiceEnroll enrolled={true} recordSeconds={FAST_SECONDS} />);
 
-  await user.click(screen.getByRole('button', { name: /Record .*sample/ }));
+  await user.click(screen.getByRole('button', { name: 'Re-record' }));
   expect(await screen.findByText('could not process recording', {}, { timeout: 2000 })).toBeInTheDocument();
-  expect(screen.getByText('🎙️ Voice ID not set up')).toBeInTheDocument();
+  expect(screen.getByText('🎙️ Voice ID ready')).toBeInTheDocument();
 });
