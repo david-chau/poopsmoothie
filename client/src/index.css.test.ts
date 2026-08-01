@@ -112,3 +112,44 @@ test('each half still owns a 3D context, for its front/back faces', () => {
   expect(block('.slip-half')).toMatch(/transform-style:\s*preserve-3d/);
   expect(block('.slip-clip')).toMatch(/backface-visibility:\s*hidden/);
 });
+
+// Regression: the drawer has the most on screen (timer + slip + both action
+// buttons + the chat panel) and is the one person who must never lose sight
+// of the clock — with chat open it used to scroll away entirely.
+test('the timer sticks to the top rather than scrolling away', () => {
+  const rule = block('.timer');
+  expect(rule).toMatch(/position:\s*sticky/);
+  expect(rule).toMatch(/top:\s*0/);
+  expect(rule).toMatch(/background:/); // or content scrolls visibly through it
+});
+
+// Regression: `.turn-actions .btn` and `.turn-actions-compact .btn` have equal
+// specificity, so the compact override only works if it comes *after*. It was
+// declared earlier and silently did nothing.
+test('the compact action buttons override the default height', () => {
+  expect(block('.turn-actions-compact .btn')).toMatch(/min-height:\s*48px/);
+  expect(css.indexOf('.turn-actions-compact .btn')).toBeGreaterThan(css.indexOf('.turn-actions .btn'));
+});
+
+// Regression: these are set-once controls competing with the timer and the
+// slip for height — they have to float, not push the log down.
+test('the voice options menu floats instead of taking permanent height', () => {
+  expect(block('.turn-chat-menu-panel')).toMatch(/position:\s*absolute/);
+  expect(block('.turn-chat-menu')).toMatch(/position:\s*relative/);
+});
+
+// Regression: in a fixed, non-scrolling column the on-screen keyboard covers
+// the compose box and there is no scrolling to escape it. 100svh describes the
+// whole screen *including* the covered part, so the height has to come from
+// the visual viewport instead (TurnChat sets --app-vh).
+test('the fixed screen shrinks to the space the keyboard leaves', () => {
+  expect(block('.app-shell:has(.screen-fit)')).toMatch(/height:\s*var\(--app-vh/);
+});
+
+// Regression: the meter used to mount/unmount with the mic, which changed the
+// header's width and bounced the ⋯ and filters onto another row mid-tap.
+test('the idle meter is hidden but still occupies the row', () => {
+  expect(block('.mic-meter-idle')).toMatch(/visibility:\s*hidden/);
+  expect(block('.mic-meter-idle')).not.toMatch(/display:\s*none/);
+  expect(block('.turn-chat-mic')).toMatch(/min-width:/);
+});

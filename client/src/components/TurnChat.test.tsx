@@ -97,9 +97,18 @@ test('each message shows the clock time it was said — the point of an audit tr
   render(<TurnChat />);
   // matched loosely: the exact separator/12-vs-24h formatting is the runtime
   // locale's business, but hour/minute/second must all be there
-  const expected = new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const expected = new Date(at).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
   expect(screen.getByText(expected)).toBeInTheDocument();
   expect(expected).toMatch(/\d{1,2}\D\d{2}\D\d{2}/);
+  // AM/PM is dead weight in a log that only ever spans one turn
+  expect(expected).not.toMatch(/[AP]M/i);
+  // the precise moment, timezone included, is still one hover away
+  expect(screen.getByTitle(new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' }))).toBeInTheDocument();
 });
 
 test('badges a message sent while that player was drawing', () => {
@@ -108,12 +117,13 @@ test('badges a message sent while that player was drawing', () => {
     msg({ id: 'b', name: 'Bob', team: 'B', wasDrawer: false, text: 'no idea' }),
   ]);
   render(<TurnChat />);
-  // exactly one drawer badge, and it belongs to Alice's row, not Bob's
-  expect(screen.getAllByText('drawer')).toHaveLength(1);
+  // exactly one drawer marker, and it belongs to Alice's row, not Bob's
+  const markers = screen.getAllByLabelText('was drawing');
+  expect(markers).toHaveLength(1);
   const aliceRow = screen.getByText('guess it').closest('li');
   const bobRow = screen.getByText('no idea').closest('li');
-  expect(aliceRow).toContainElement(screen.getByText('drawer'));
-  expect(bobRow).not.toContainElement(screen.queryByText('drawer'));
+  expect(aliceRow).toContainElement(markers[0]);
+  expect(bobRow).not.toContainElement(markers[0]);
 });
 
 test('marks voice-derived messages distinctly from typed ones', () => {
@@ -373,11 +383,34 @@ const micOn = (over: Record<string, unknown> = {}) => {
   });
 };
 
-test('the meter only appears while the mic is actually listening', () => {
+test('the live meter holds its place while the mic is off, rather than unmounting', () => {
+  // it must not *read* as live, but it must still occupy the row: mounting it
+  // on toggle reflowed the header and moved the ⋯ and filters under the
+  // finger that had just tapped the mic
+  micOn({ on: false });
+  setup([]);
+  const { container, unmount } = render(<TurnChat />);
+  const idle = container.querySelector('.mic-meter');
+  expect(idle).not.toBeNull();
+  expect(idle).toHaveClass('mic-meter-idle');
+  expect(idle).toHaveAttribute('aria-hidden', 'true');
+  unmount();
+
+  micOn({ on: true });
+  setup([]);
+  const { container: live } = render(<TurnChat />);
+  expect(live.querySelector('.mic-meter')).not.toHaveClass('mic-meter-idle');
+});
+
+test('the set-once controls live behind the menu, available even with the mic off', () => {
+  // sensitivity and re-record are reachable whether or not you're currently
+  // transmitting — what they must NOT do is cost permanent height, which is
+  // why they sit in <details> rather than in the header
   micOn({ on: false });
   setup([]);
   render(<TurnChat />);
-  expect(screen.queryByLabelText('Mic sensitivity')).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Voice options')).toBeInTheDocument();
+  expect(screen.getByLabelText('Mic sensitivity')).toBeInTheDocument();
 });
 
 test('a level above the threshold reads as passing, below as not', () => {
@@ -477,4 +510,75 @@ test('an edited message says so — a correction must not read as what was said 
   setup([msg({ id: 'm', playerId: 'p2', text: 'Too', edited: true })], 'p1');
   render(<TurnChat />);
   expect(screen.getByText('(edited)')).toBeInTheDocument();
+});
+
+// --- mobile affordances: no hover, no page scroll to fall back on ---------
+
+test('tapping a timestamp reveals the full date/time/zone, and blurring restores it', async () => {
+  const user = userEvent.setup();
+  const at = new Date(2026, 0, 2, 14, 5, 9).getTime();
+  setup([msg({ id: 'a', at, text: 'said it' })]);
+  render(<TurnChat />);
+
+  const short = new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  const full = new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' });
+
+  const button = screen.getByRole('button', { name: `Sent ${full}` });
+  expect(button).toHaveTextContent(short);
+
+  await user.click(button);
+  expect(button).toHaveTextContent(full);
+
+  await user.tab(); // move focus away
+  expect(button).toHaveTextContent(short);
+});
+
+test('the mic toggle keeps a stable width so the row does not reflow on toggle', () => {
+  micOn({ on: false });
+  setup([]);
+  const { container, unmount } = render(<TurnChat />);
+  const off = container.querySelector('.turn-chat-mic')?.className;
+  unmount();
+
+  micOn({ on: true });
+  setup([]);
+  const { container: on } = render(<TurnChat />);
+  // both states carry the class that pins the minimum width; the CSS test
+  // asserts the rule itself exists
+  expect(off).toContain('turn-chat-mic');
+  expect(on.querySelector('.turn-chat-mic')?.className).toContain('turn-chat-mic');
+});
+
+test('tapping outside the voice menu closes it', async () => {
+  const user = userEvent.setup();
+  micOn({ on: true });
+  setup([]);
+  const { container } = render(<TurnChat />);
+
+  const menu = container.querySelector('details') as HTMLDetailsElement;
+  await user.click(screen.getByLabelText('Voice options'));
+  expect(menu.open).toBe(true);
+
+  // <details> has no light-dismiss of its own — without the handler this
+  // stays open, sitting over the log on a phone
+  await user.click(document.body);
+  expect(menu.open).toBe(false);
+});
+
+test('the compose box pulls itself into view on focus, above the keyboard', async () => {
+  vi.useFakeTimers();
+  try {
+    setup([]);
+    render(<TurnChat />);
+    const input = screen.getByPlaceholderText('Say something…');
+    const scrollIntoView = vi.fn();
+    input.scrollIntoView = scrollIntoView;
+
+    fireEvent.focus(input);
+    expect(scrollIntoView).not.toHaveBeenCalled(); // waits for the keyboard first
+    vi.advanceTimersByTime(300);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', behavior: 'smooth' });
+  } finally {
+    vi.useRealTimers();
+  }
 });

@@ -89,7 +89,12 @@ export default function Turn() {
   }
 
   return (
-    <div className="screen">
+    // With chat on, this screen is the one that has to fit rather than scroll:
+    // the timer and the slip are useless if they've slid off, and the log is
+    // the only part that genuinely wants to grow. `.screen-fit` bounds the
+    // column to the viewport and hands the leftover height to the log, which
+    // then scrolls on its own instead of the whole page doing it.
+    <div className={`screen${state.config.chatEnabled ? ' screen-fit' : ''}`}>
       <header className="turn-header">
         <span className="round-label">
           {roundIcon} Round {round.number}: {roundLabel}
@@ -150,7 +155,19 @@ export default function Turn() {
             slipKey={mySlip.id}
             flash={flashEvent ? { id: flashEvent.id, kind: flashEvent.kind } : null}
           />
-          <div className={canPass ? 'turn-actions' : 'turn-actions turn-actions-single'}>
+          {/* the chat panel only exists when it's switched on, and only the
+              drawer has the slip + both buttons above it — so that's the one
+              combination where the column runs out of room and the buttons
+              give some back */}
+          <div
+            className={[
+              'turn-actions',
+              canPass ? '' : 'turn-actions-single',
+              state.config.chatEnabled ? 'turn-actions-compact' : '',
+            ]
+              .filter(Boolean)
+              .join(' ')}
+          >
             {canPass && (
               <button className="btn btn-pass" onClick={() => act('pass-turn')}>
                 Pass

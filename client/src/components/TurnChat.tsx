@@ -72,6 +72,7 @@ export default function TurnChat() {
 
   useEffect(() => onVoiceAvailable(setVoiceAvailable), []);
   const listRef = useRef<HTMLUListElement>(null);
+  const menuRef = useRef<HTMLDetailsElement>(null);
   // whether we were scrolled near the bottom *before* this render's messages
   // landed — read in an effect below, so a message arriving while someone has
   // scrolled up to reread something doesn't yank them back down
@@ -101,6 +102,35 @@ export default function TurnChat() {
     const el = listRef.current;
     if (el && wasNearBottom.current) el.scrollTop = el.scrollHeight;
   }, [visible.length]);
+
+  // <details> has no built-in light-dismiss: without this the voice menu stays
+  // open until you tap the ⋯ again, which on a phone means it sits over the
+  // log while you're trying to read it. pointerdown, not click, so it closes
+  // on the same gesture that starts the tap rather than a frame later.
+  useEffect(() => {
+    function onPointerDown(e: PointerEvent) {
+      const menu = menuRef.current;
+      if (menu?.open && !menu.contains(e.target as Node)) menu.open = false;
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => document.removeEventListener('pointerdown', onPointerDown);
+  }, []);
+
+  // The turn screen is a fixed, non-scrolling column (see .screen-fit), which
+  // means the on-screen keyboard would otherwise cover the compose box with no
+  // way to scroll to it. visualViewport reports the space the keyboard leaves
+  // behind, so the whole column shrinks to fit above it instead.
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () => document.documentElement.style.setProperty('--app-vh', `${vv.height}px`);
+    apply();
+    vv.addEventListener('resize', apply);
+    return () => {
+      vv.removeEventListener('resize', apply);
+      document.documentElement.style.removeProperty('--app-vh');
+    };
+  }, []);
 
   function handleScroll() {
     const el = listRef.current;
@@ -166,10 +196,39 @@ export default function TurnChat() {
                   : '🎙️ Record 5s sample'}
           </button>
         )}
-        {/* level + threshold live next to the toggle they belong to, rather
-            than in a block of their own — as a boxed row with its own caption
-            they cost more vertical space than the chat log they sat above */}
-        {micVisible && mic.on && <MicMeter level={mic.level} sensitivity={mic.sensitivity} onChange={mic.setSensitivity} />}
+        {/* the live level sits next to the toggle it belongs to; everything
+            you only touch once (sensitivity, re-recording your voiceprint)
+            moves into the ⋯ menu. On the drawer's screen this panel competes
+            with the timer and the slip for height, so only the thing you read
+            *while talking* earns a permanent place here. */}
+        {/* rendered whether or not the mic is live, and merely *hidden* when
+            it isn't: mounting it on toggle changed the header's width mid-row
+            and bounced the ⋯ and the filters onto a different line, so the
+            controls moved out from under your finger as you tapped them */}
+        {micVisible && <MicMeter level={mic.level} sensitivity={mic.sensitivity} idle={!mic.on} />}
+        {micVisible && (
+          <details className="turn-chat-menu" ref={menuRef}>
+            <summary className="turn-chat-menu-btn" title="Voice options" aria-label="Voice options">
+              ⋯
+            </summary>
+            <div className="turn-chat-menu-panel">
+              <label className="turn-chat-menu-row">
+                <span>Sensitivity</span>
+                <input
+                  type="range"
+                  min={MIN_ENERGY_RANGE.min}
+                  max={MIN_ENERGY_RANGE.max}
+                  step={0.002}
+                  value={mic.sensitivity}
+                  onChange={(e) => mic.setSensitivity(Number(e.target.value))}
+                  aria-label="Mic sensitivity"
+                />
+              </label>
+              <p className="turn-chat-menu-hint">Drag right to ignore more distant/quiet sound.</p>
+              <VoiceEnroll enrolled={voiceEnrolled} />
+            </div>
+          </details>
+        )}
         <div className="turn-chat-filters" role="group" aria-label="Filter chat">
           {(['all', 'team', 'drawer'] as Filter[]).map((f) => (
             <button
@@ -183,8 +242,6 @@ export default function TurnChat() {
           ))}
         </div>
       </div>
-
-      {micVisible && <VoiceEnroll enrolled={voiceEnrolled} />}
 
       {httpsUrl && (
         <p className="turn-chat-https-hint">
@@ -215,6 +272,13 @@ export default function TurnChat() {
           onKeyDown={(e) => {
             if (e.key === 'Enter') send();
           }}
+          // the keyboard animates in after focus fires, so the layout it
+          // leaves behind doesn't exist yet at this point — one frame later it
+          // does, and this pulls the box back into it
+          onFocus={(e) => {
+            const el = e.currentTarget;
+            setTimeout(() => el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 250);
+          }}
           placeholder={isDrawer ? 'Say something (careful, no giving it away!)' : 'Say something…'}
           maxLength={200}
         />
@@ -242,34 +306,23 @@ const pct = (v: number) => `${Math.min(100, Math.max(0, (v / METER_FULL_SCALE) *
  * other — so they share one bar rather than sitting in separate widgets: talk
  * normally, and if the fill doesn't pass the marker, the server is discarding
  * you. Bar segments past the marker are tinted to make "this counts" obvious
- * without needing the legend.
+ * without needing a legend.
+ *
+ * Read-only: the slider that moves the marker lives in the ⋯ menu, because
+ * this is the part you watch continuously and that is the part you set once.
  */
-function MicMeter({
-  level,
-  sensitivity,
-  onChange,
-}: {
-  level: number;
-  sensitivity: number;
-  onChange: (v: number) => void;
-}) {
+function MicMeter({ level, sensitivity, idle }: { level: number; sensitivity: number; idle?: boolean }) {
   const passing = level >= sensitivity;
   return (
-    <div className="mic-meter" title="Live input level. Your speech should push the bar past the line — drag the slider right to ignore more distant/quiet sound.">
+    <div
+      className={`mic-meter${idle ? ' mic-meter-idle' : ''}`}
+      aria-hidden={idle || undefined}
+      title="Live input level. Your speech should push the bar past the line — adjust the threshold under ⋯."
+    >
       <div className="mic-meter-bar" role="presentation">
         <div className={`mic-meter-fill${passing ? ' mic-meter-fill-passing' : ''}`} style={{ width: pct(level) }} />
         <div className="mic-meter-threshold" style={{ left: pct(sensitivity) }} />
       </div>
-      <input
-        className="mic-meter-slider"
-        type="range"
-        min={MIN_ENERGY_RANGE.min}
-        max={MIN_ENERGY_RANGE.max}
-        step={0.002}
-        value={sensitivity}
-        onChange={(e) => onChange(Number(e.target.value))}
-        aria-label="Mic sensitivity"
-      />
     </div>
   );
 }
@@ -277,7 +330,23 @@ function MicMeter({
 /** Clock time, not "3s ago" — the whole point of this log is settling "who
  *  said what, when", and a relative label needs re-rendering to stay true. */
 function clockTime(at: number) {
-  return new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  // hour12:false rather than the locale's default — every line in this log is
+  // from the same few minutes of the same turn, so AM/PM is four characters
+  // that never once disambiguate anything, on the screen with the least room
+  return new Date(at).toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+/** The full thing — date, and the timezone it was recorded in — for the hover.
+ *  A transcript that settles "who said what when" should be able to answer
+ *  that precisely if anyone actually asks; it just shouldn't spend the
+ *  room on it by default. */
+function fullTimestamp(at: number) {
+  return new Date(at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'long' });
 }
 
 function ChatRow({
@@ -295,6 +364,7 @@ function ChatRow({
   const [draft, setDraft] = useState(message.text);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showFullTime, setShowFullTime] = useState(false);
 
   async function save() {
     const trimmed = draft.trim();
@@ -354,11 +424,28 @@ function ChatRow({
 
   return (
     <li className="turn-chat-row">
-      <span className="turn-chat-time">{clockTime(message.at)}</span>
+      {/* a button, not a bare `title`: hover doesn't exist on a phone, and
+          this log is most likely to be interrogated on one. Tap swaps in the
+          full date/time/zone, tapping again or moving focus away puts it back. */}
+      <button
+        type="button"
+        className="turn-chat-time"
+        title={fullTimestamp(message.at)}
+        aria-label={`Sent ${fullTimestamp(message.at)}`}
+        onClick={() => setShowFullTime((v) => !v)}
+        onBlur={() => setShowFullTime(false)}
+      >
+        <time dateTime={new Date(message.at).toISOString()}>
+          {showFullTime ? fullTimestamp(message.at) : clockTime(message.at)}
+        </time>
+      </button>
       <span className={`turn-chat-name ${TEAM_CLASS[message.team]}`}>{message.name}</span>
       {message.wasDrawer && (
-        <span className="badge turn-chat-badge" title="Was drawing when they said this">
-          drawer
+        // a glyph rather than the word "drawer" in a pill: same information,
+        // roughly a fifth of the width, on a row that has to fit a timestamp,
+        // a name, the text and two actions
+        <span className="turn-chat-badge-icon" title="Was drawing when they said this" aria-label="was drawing">
+          🎨
         </span>
       )}
       {message.via === 'voice' && (

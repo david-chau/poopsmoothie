@@ -140,6 +140,63 @@ p {
   flex: 1;
 }
 
+/* ── a screen that fits instead of scrolling ───────────────────────────────
+   Used by the turn screen once chat is on. The problem it solves: the drawer
+   has a timer, a slip, two actions AND a growing transcript, and letting the
+   page scroll meant the two things you cannot play without (the clock and the
+   word) slid off the top while an empty gap opened below the log.
+
+   `:has()` rather than a prop threaded down to the shell — the shell is the
+   only element that can bound the height, and this is exactly the "does a
+   descendant want this?" question :has() exists to answer. Where it isn't
+   supported the page simply scrolls as before, which is the old behaviour
+   rather than a broken one. */
+/* --app-vh is the visual viewport's height, set by TurnChat while this screen
+   is mounted: with the keyboard up, 100svh still describes the *whole* screen
+   including the part the keyboard now covers, so the compose box would sit
+   underneath it with no way to scroll to it in a fixed column. */
+.app-shell:has(.screen-fit) {
+  height: var(--app-vh, 100svh);
+  overflow: hidden;
+}
+
+.screen-fit {
+  min-height: 0; /* a flex item won't shrink below content without this */
+  overflow: hidden;
+  /* six children at 0.75rem is 3.75rem of pure air on the screen with the
+     least of it to give */
+  gap: 0.5rem;
+}
+
+/* the slip keeps a sensible size but stops *demanding* 30vh, so the squeeze
+   lands on whitespace before it lands on the paper */
+.screen-fit .paper-slip-stage {
+  flex: 0 1 auto;
+  min-height: 18vh;
+}
+
+/* The panel takes whatever is left, and its log is what actually scrolls.
+   flex-basis 0, not auto: with `auto` the basis is the log's own content
+   height, so a busy transcript *demanded* room rather than accepting the
+   leftover — it grew to 478px and pushed the timer and the slip off the top
+   of a clipped container, which is worse than the scrolling it replaced. */
+/* .card's 1rem all round is generous for a panel that is now competing with
+   the slip for the drawer's screen — the log is what people read, not the
+   margin around it */
+.screen-fit .turn-chat {
+  padding: 0.6rem;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.screen-fit .turn-chat-log {
+  flex: 1 1 0;
+  min-height: 2.5rem;
+  max-height: none;
+}
+
 .title {
   font-size: clamp(1.5rem, 5vw, 2.25rem);
 }
@@ -495,12 +552,23 @@ input:focus,
   animation: scorePulse 0.6s ease-out forwards;
 }
 
+/* Sticky, because the drawer is the one person who must never lose sight of
+   it and also the one with the most on screen — with chat open the timer
+   scrolled away entirely, which is the one thing the turn is actually
+   racing. Sits above the slip so a passing slip can't cover it. */
 .timer {
+  position: sticky;
+  top: 0;
+  z-index: 4;
   font-size: clamp(2.5rem, 15vw, 4rem);
   font-weight: 800;
   text-align: center;
   font-variant-numeric: tabular-nums;
+  /* the page background, so text scrolling underneath doesn't show through */
+  background: var(--bg);
+  padding-block: 0.15rem;
 }
+
 
 .paper-slip-stage {
   flex: 1;
@@ -769,6 +837,15 @@ input:focus,
 .turn-actions .btn {
   min-height: 64px;
   font-size: 1.15rem;
+}
+
+/* With chat open the drawer's column is timer + slip + two big buttons + the
+   log. The buttons are the easiest thing to give back: they're big for
+   thumb-reach, and 48px still clears the 44px touch-target floor. Scoped to
+   the drawer's own action row, so nobody else's layout changes. */
+.turn-actions-compact .btn {
+  min-height: 48px;
+  font-size: 1rem;
 }
 
 .btn-pass {
@@ -1680,6 +1757,10 @@ input:focus,
 .turn-chat-mic {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  /* "On" and "Off" are different widths; without a floor the whole row
+     re-flows every time the mic is toggled */
+  min-width: 4.25rem;
   gap: 0.3rem;
   width: auto;
   padding: 0.15rem 0.55rem;
@@ -1707,6 +1788,13 @@ input:focus,
   min-width: 4.5rem;
 }
 
+/* holds its place while the mic is off rather than unmounting: the header
+   reflowed on every toggle otherwise, moving the ⋯ and the filters to a
+   different row under the finger that just tapped them */
+.mic-meter-idle {
+  visibility: hidden;
+}
+
 .mic-meter-bar {
   position: relative;
   flex: 1 1 auto;
@@ -1718,13 +1806,76 @@ input:focus,
   overflow: hidden;
 }
 
-/* deliberately short — it's a nudge-to-taste control, not a precise one, and
-   the bar beside it is what actually tells you whether it's set right */
-.mic-meter-slider {
-  flex: 0 0 4rem;
-  width: 4rem;
+/* Set-once controls (sensitivity, re-recording a voiceprint) behind a ⋯ —
+   on the drawer's screen the chat panel competes with the timer and the slip
+   for height, and a permanently-visible slider plus a Voice ID row cost more
+   than the log itself. Native <details>, so this is a disclosure widget the
+   browser already knows how to open, close and label. */
+.turn-chat-menu {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.turn-chat-menu-btn {
+  list-style: none;
+  cursor: pointer;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+/* Safari draws its own disclosure triangle via a pseudo-element that
+   `list-style: none` alone doesn't remove */
+.turn-chat-menu-btn::-webkit-details-marker {
+  display: none;
+}
+
+.turn-chat-menu-btn:hover,
+.turn-chat-menu[open] .turn-chat-menu-btn {
+  color: var(--text);
+}
+
+/* floats over the log rather than pushing it down — the whole point is to
+   stop these controls from costing permanent height */
+.turn-chat-menu-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 5;
+  width: max(15rem, 60vw);
+  max-width: 18rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 0.6rem;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: var(--shadow-md);
+}
+
+.turn-chat-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.turn-chat-menu-row input[type='range'] {
+  flex: 1;
+  min-width: 0;
   margin: 0;
   accent-color: var(--accent);
+}
+
+.turn-chat-menu-hint {
+  margin: 0;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  color: var(--text-dim);
 }
 
 .mic-meter-fill {
@@ -1783,7 +1934,9 @@ input:focus,
   display: flex;
   flex-direction: column;
   gap: 0.35rem;
-  max-height: 11rem;
+  /* capped in vh as well as rem: on a short phone in landscape the fixed
+     11rem was most of the drawer's remaining column */
+  max-height: min(11rem, 22vh);
   overflow-y: auto;
 }
 
@@ -1798,9 +1951,11 @@ input:focus,
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
-  gap: 0.35rem;
-  font-size: 0.85rem;
-  line-height: 1.35;
+  gap: 0.3rem;
+  /* a transcript, not the conversation itself — it is read in glances, and on
+     the drawer's screen every line here is height taken from the slip */
+  font-size: 0.8rem;
+  line-height: 1.3;
 }
 
 .turn-chat-https-hint {
@@ -1815,6 +1970,16 @@ input:focus,
 
 .turn-chat-time {
   flex: 0 0 auto;
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  width: auto;
+  min-height: 0;
+  box-shadow: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
   font-size: 0.7rem;
   color: var(--text-dim);
   font-variant-numeric: tabular-nums; /* so the column doesn't jitter as digits change */
@@ -1825,13 +1990,15 @@ input:focus,
   flex: 0 0 auto;
 }
 
-.turn-chat-badge {
-  font-size: 0.6rem;
-  padding: 0.05rem 0.4rem;
+/* the drawer marker is a glyph now, not a pill — same meaning, a fraction of
+   the width on the narrowest row in the app */
+.turn-chat-badge-icon {
+  font-size: 0.7rem;
+  line-height: 1;
 }
 
 .turn-chat-voice {
-  font-size: 0.75rem;
+  font-size: 0.7rem;
 }
 
 .turn-chat-text {
