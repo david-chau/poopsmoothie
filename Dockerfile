@@ -19,7 +19,7 @@ RUN npm run build
 # sherpa-onnx-node ships prebuilt glibc binaries (no musl/alpine build), so
 # the runtime stage below isn't alpine — client-build above stays alpine,
 # that one never touches the native addon.
-FROM node:22-slim
+FROM node:26.5.1-slim
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
