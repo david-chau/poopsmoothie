@@ -1,0 +1,41 @@
+name: checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            client/package-lock.json
+
+      - name: Install server deps
+        run: npm ci
+
+      - name: Server tests
+        run: npm test
+
+      - name: Install client deps
+        run: npm ci
+        working-directory: client
+
+      - name: Client tests
+        run: npm run test
+        working-directory: client
+
+      - name: Client lint
+        run: npm run lint
+        working-directory: client
+
+  # e2e is deliberately not here: it drives a real browser with a 300s
+  # timeout, which belongs on a schedule or a label rather than every push.
