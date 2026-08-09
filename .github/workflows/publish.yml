@@ -8,7 +8,12 @@ env:
   IMAGE: ghcr.io/david-chau/poopsmoothie
 
 jobs:
+  # Nothing ships that the suite has not passed.
+  test:
+    uses: ./.github/workflows/checks.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
